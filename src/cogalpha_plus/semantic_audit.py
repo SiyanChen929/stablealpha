@@ -1,7 +1,7 @@
 """Fail-closed economic-semantic review manifests for frozen Factor Cards.
 
 This module deliberately does *not* infer, score, or approve semantic reviews.
-The caller must supply one complete human/Codex review record for every frozen
+The caller must supply one complete human/LLM review record for every frozen
 Factor Card.  The five proposal file digests and their exact candidate-key set
 are code-side trust anchors.  While those anchors remain trusted, changing
 proposals and coherently re-sealing only the review manifest is rejected.  This

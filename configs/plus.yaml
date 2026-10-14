@@ -1,0 +1,332 @@
+schema_version: "1.0"
+profile_id: cogalpha_plus
+profile_version: "2026-08-29"
+description: >-
+  Quality-oriented extension of the faithful profile. It preserves the same core
+  population, parent, offspring, generation, injection cadence, elite, and final
+  factor budgets while adding a safe DSL, production-canonical structural
+  deduplication, mechanism-aware variation, development-only adaptive feedback,
+  and a scalar quality-diversity parent heuristic. Capabilities listed under
+  roadmap are not runtime claims.
+
+inherits_search_shape_from: configs/faithful.yaml
+
+agent_hierarchy:
+  catalog: configs/agents.yaml
+  enabled_levels: [1, 2, 3, 4, 5, 6, 7]
+  enabled_agent_count: 21
+  scheduling: auditable_island_style
+  agent_memory_scope: per_agent_plus_global_coverage_map
+  guidance_paraphrase: enabled
+  adaptive_feedback:
+    enabled: true
+    structure: observation_cause_fix
+    sources: [effective_factors, ineffective_factors, rejection_reasons, coverage_gaps]
+    allowed_splits: [train, inner_validation]
+    sealed_test_feedback: forbidden
+    runtime_controller: AdaptiveFeedbackMemory
+    diagnostic_allowlist: [rejection, coverage, train_raw_rank_ic]
+    scalar_score_inputs:
+      - neutral_rank_ic
+      - turnover
+      - worst_window_ic
+      - style_retention
+      - novelty
+      - control_delta
+    fixed_thresholds:
+      minimum_coverage: 0.80
+      maximum_turnover: 0.45
+      minimum_style_retention: 0.65
+      minimum_worst_window_ic: 0.0
+      minimum_novelty: 0.25
+      minimum_control_delta: 0.0
+    deterministic_repairs:
+      insufficient_coverage: shorten_lookback
+      excessive_turnover: persistence_smoothing
+      style_shortcut: style_robustification
+      window_instability: stability_smoothing
+      behavioral_duplication: novelty_recombination
+      no_increment_over_control: nonlinear_refinement
+      invalid_or_fragile_structure: conservative_repair
+      effective_or_weak_mechanism: parameter_refinement
+    lineage_record: per_child_observation_cause_fix
+    failure_memory: permanent_within_run_per_role
+    role_coverage: preserve_viable_role_in_parent_pool_then_target_missing_roles_on_injection
+
+# These values intentionally match faithful.yaml.
+search_budget:
+  budget_equivalence: strict
+  initial_population: 80
+  parent_pool: 32
+  offspring_per_generation: 96
+  generations: 24
+  subcycles:
+    count: 3
+    generations_each: 8
+  fresh_injection:
+    interval_generations: 2
+    within_offspring_budget: true
+    slots_on_injection_generation: 8
+  elite_carryover: 2
+  final_factor_count: 20
+
+representation:
+  primary: typed_factor_dsl
+  canonical_form: normalized_ast
+  arbitrary_python: forbidden_by_default
+  extension_path:
+    requires_operator_review: true
+    sandbox:
+      network: denied
+      filesystem: read_only_allowlist
+      wall_time_limit: required
+      memory_limit: required
+  field_availability_type_system:
+    implemented: false
+    actual_runtime_guard: fixed_production_field_allowlist_plus_causal_operator_rules
+  general_unit_type_system:
+    implemented: false
+    actual_runtime_guard: price_scale_degree_proof_for_price_fields_only
+  price_scale_degree_proof:
+    implemented: true
+    required_output_degree: 0
+  maximum_lookback_inference:
+    implemented: true
+
+evolution:
+  precommitted_adaptive_injection:
+    codex_authored_cards: 96
+    selection: development_feedback_role_and_repair_match
+    without_replacement: true
+    reserve_card_asts_from_other_operators: true
+    terminal_accounting: require_all_96_evaluated_and_zero_remaining
+  operations:
+    - deterministic_dsl_mutation
+    - semantic_mutation
+    - mechanism_aware_crossover
+    - crossover_then_mutation
+    - fresh_mechanism_injection
+  offspring_allocation_non_injection_generation:
+    deterministic_dsl_mutation: 24
+    semantic_mutation: 24
+    mechanism_aware_crossover: 24
+    crossover_then_mutation: 24
+  offspring_allocation_injection_generation:
+    deterministic_dsl_mutation: 22
+    semantic_mutation: 22
+    mechanism_aware_crossover: 22
+    crossover_then_mutation: 22
+    fresh_mechanism_injection: 8
+  allocation_total_check: 96
+  parent_matching:
+    implemented: role_targeted_metric_and_tag_preference
+    complementary_crossover_tags: soft_preference
+    semantic_similarity_hard_gate: false
+    residual_factor_correlation_hard_gate: false
+  child_must_compete_against:
+    - parent_a
+    - parent_b
+    - simple_linear_parent_blend
+  maximum_ast_nodes: 48
+  maximum_nested_rolling_depth: 4
+  lineage_required: true
+
+quality_checker:
+  deterministic_before_llm: true
+  runtime_stages:
+    - schema_and_type_check
+    - static_temporal_check
+    - numerical_safety_check
+    - truncation_recompute_check
+    - per_security_price_scale_invariance_check
+    - immutable_candidate_identity_check
+  precommitted_factor_card_stages:
+    - codex_economic_logic_and_falsification_statement
+    - production_dsl_validation
+  fail_closed: true
+
+deduplication:
+  structural:
+    enabled: true
+    representation: normalized_ast
+    canonicalize_commutative_operations: true
+    canonicalize_equivalent_windows: false
+  semantic:
+    enabled: false
+    status: roadmap_not_used_by_runtime
+  behavioral:
+    enabled: true
+    status: implemented_for_final_champion_family
+    scope: final_champion_selection_inner_validation_only
+    metric: mean_daily_cross_sectional_spearman
+    maximum_absolute_correlation: 0.85
+    initial_top_pool_size: 200
+    threshold_relaxation: false
+    insufficient_family: fail_closed
+  failed_factor_memory:
+    enabled: true
+    scope: current_run_only
+    permanent_within_project: false
+
+selection:
+  strategy: scalar_fitness_with_role_and_tag_quality_diversity
+  parent_pool_size: 32
+  implemented_components:
+    - scalar_development_fitness
+    - elite_carryover
+    - original_role_representatives_when_available
+    - mechanism_tag_crowding_penalty
+    - behavioral_novelty_soft_bonus
+    - final_family_behavioral_correlation_hard_gate
+  not_implemented: [nsga2, map_elites]
+  constraints:
+    factor_direction_source: train_only
+    outer_test_access: forbidden
+    sealed_test_access: forbidden
+    minimum_cross_sectional_coverage: 0.70
+
+validation:
+  split_design: single_purged_train_inner_validation_plus_one_time_sealed_replay
+  embargo_trading_days: label_horizon
+  overlapping_label_inference: hac_or_block_bootstrap
+  trial_ledger: all_candidates_and_all_variants
+  multiple_testing:
+    enabled: true
+    scope: one_time_sealed_reveal_only
+    methods: [block_bootstrap_max_t, holm_step_down_fwer]
+    false_discovery_rate: false
+  noise_search_control:
+    enabled: false
+    status: roadmap_block_shift_preserving_time_dependence
+  neutralization_views:
+    - raw
+    - industry_neutral
+    - style_neutral
+  existing_library_residual_view:
+    enabled: false
+    status: roadmap
+
+roadmap_not_used_by_current_runtime:
+  implemented: false
+  features:
+    - purged_expanding_walk_forward_refits
+    - residual_factor_correlation_parent_gate
+    - semantic_similarity_parent_gate
+    - project_persistent_failed_memory
+    - label_randomization_search_null
+    - nsga2
+    - map_elites
+
+factor_discovery_runtime_capabilities:
+  nsga2: false
+  map_elites: false
+  purged_expanding_walk_forward_refits: false
+  behavioral_correlation_hard_dedup: true
+  behavioral_correlation_hard_dedup_scope: final_champion_selection_only
+  semantic_similarity_hard_dedup: false
+  residual_factor_correlation_parent_gate: false
+  structural_ast_dedup: true
+  behavioral_novelty_soft_fitness_term: true
+  scalar_role_and_tag_quality_diversity_heuristic: true
+
+ensemble:
+  scope: frozen_development_family_joint_one_time_reveal
+  invoked_by_hs300_factor_discovery_runtime: true
+  status: fixed_family_no_backend_selection
+  handoff:
+    min_names: 20
+    minimum_daily_factor_coverage: 0.80
+    maximum_zero_impute_share: 0.20
+    maximum_absolute_neutral_correlation: 0.999
+    allow_leading_train_warmup: true
+    minimum_retained_train_dates: 40
+    minimum_daily_label_coverage: 1.0
+    allow_label_row_drop: false
+    schema_version: 1
+  composite_family:
+    primary_backend: lightgbm
+    members: [equal_weight, ridge, lightgbm]
+    ridge_alpha: 1.0
+    random_state: 17
+    schema_version: 1
+    lightgbm_configuration:
+      objective: regression
+      n_estimators: 300
+      learning_rate: 0.03
+      num_leaves: 31
+      min_child_samples: 100
+      subsample: 0.8
+      subsample_freq: 1
+      colsample_bytree: 0.8
+      reg_alpha: 0.1
+      reg_lambda: 1.0
+      deterministic: true
+      force_col_wise: true
+      n_jobs: 1
+      verbosity: -1
+      random_state: 17
+  validation_metrics_usage: descriptive_only_never_selection_or_tuning
+  backend_selection_allowed: false
+  pre_registered_contrasts:
+    [lightgbm_minus_equal_weight, ridge_minus_equal_weight, lightgbm_minus_ridge]
+  sealed_reporting: unique_lightgbm_primary_with_joint_23_fwer_and_pre_registered_secondaries
+  reporting_contract:
+    schema_version: 1
+    unique_primary_result_key: composite:lightgbm
+    unique_primary_backend: lightgbm
+    primary_endpoint_key: sealed_neutral
+    primary_inference_key: joint_multiple_testing
+    joint_multiplicity_family: all_20_factors_plus_3_composites
+    joint_multiplicity_family_size: 23
+    joint_family_role: conservative_fwer_control_not_a_selection_or_winner_pool
+    component_factor_role: pre_registered_secondary_component_factor_diagnostic
+    control_composite_result_keys: [composite:equal_weight, composite:ridge]
+    control_composite_role: pre_registered_secondary_model_control
+    contrast_family_role: pre_registered_secondary_model_comparison
+    immediate_executable_role: pre_registered_secondary_execution_sensitivity_diagnostic
+    secondary_results_eligible_for_primary_claim: false
+    backend_selection_from_sealed_results_allowed: false
+    primary_reassignment_allowed: false
+
+capacity_policy:
+  scope: downstream_portfolio_and_execution
+  invoked_by_hs300_factor_discovery_runtime: false
+  status: implemented_constraints_require_real_data_calibration_before_capital_use
+  institutional_capacity_required: false
+  actual_tradability_required: true
+  allow_capacity_alpha_sleeve: true
+  capacity_alpha_must_be_labeled: true
+  required_execution_checks:
+    - suspension
+    - price_limits
+    - board_lot
+    - t_plus_one
+    - minimum_commission
+    - slippage
+    - participation_rate
+
+audit:
+  immutable_run_manifest: true
+  model_and_prompt_versioning: true
+  data_snapshot_hash: true
+  factor_lineage_graph: true
+  rejected_candidate_log: true
+  metric_implementation_version: true
+  sealed_test_one_time_reveal: true
+
+comparison_protocol:
+  status: planned_external_comparison_not_invoked_by_runtime
+  automated_runtime_invocation: false
+  faithful_profile: configs/faithful.yaml
+  equal_budget_required: true
+  ablations:
+    implemented: false
+    planned:
+      - generation_only
+      - mutation_only
+      - crossover_only
+      - mutation_crossover_without_feedback
+      - complete_plus
+  primary_success_measure: >-
+    Number of independent factors that pass the sealed statistical gate per fixed
+    candidate-evaluation budget, followed by incremental cost-adjusted portfolio IR.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass
 import hashlib
 import json
@@ -45,7 +46,17 @@ from .metrics import (
     summarize_ic,
 )
 from .manifest import hash_json
-from .terminal_labels import TerminalLabelBridge, apply_terminal_label_bridges
+from .python_factor import (
+    PythonFactorSandboxPolicy,
+    PythonFactorValidationError,
+    parse_python_factor,
+    render_python_factor,
+)
+from .terminal_labels import (
+    TerminalLabelBridge,
+    apply_terminal_label_bridges,
+    validate_terminal_label_bridge_identity,
+)
 
 
 FEATURE_FIELDS = frozenset({"open", "high", "low", "close", "volume", "amount", "vwap"})
@@ -80,7 +91,9 @@ EXACT_FORWARD_LABEL_RULE_V1: Mapping[str, object] = {
     "missing_symbol_bar_policy": (
         "missing_label_no_compression_no_fill_no_drop_except_sourced_terminal_exchange"
     ),
-    "terminal_exchange_policy": "exact_endpoint_successor_raw_vwap_valuation_only",
+    "terminal_exchange_policy": (
+        "exact_endpoint_successor_raw_endpoint_price_valuation_only"
+    ),
     "standard_label_required_daily_coverage": 1.0,
 }
 
@@ -303,6 +316,7 @@ def build_immediate_executable_labels(
     entry_delay: int,
     trading_calendar: Sequence[pd.Timestamp] | pd.DatetimeIndex | None,
     allow_test_calendar_from_panel: bool = False,
+    price_field: str = "vwap",
 ) -> tuple[pd.Series, dict[str, object]]:
     """Build a fixed-endpoint executability diagnostic beside the forecast label.
 
@@ -333,8 +347,10 @@ def build_immediate_executable_labels(
     limit_up, limit_up_source = status("limit_up", False)
     limit_down, limit_down_source = status("limit_down", False)
     limit_known, limit_known_source = status("limit_proxy_known", True)
+    if price_field not in {"open", "vwap"}:
+        raise ValueError("executable label price_field must be open or vwap")
     labels = endpoint_executable_forward_return(
-        feature_frame["vwap"],
+        feature_frame[price_field],
         tradable,
         horizon,
         entry_delay=entry_delay,
@@ -345,7 +361,8 @@ def build_immediate_executable_labels(
         execution_status_known=limit_known,
     )
     return labels, {
-        "definition": "exact_frozen_calendar_scheduled_adjusted_vwap_endpoints_long_only_no_delay",
+        "definition": f"exact_frozen_calendar_scheduled_adjusted_{price_field}_endpoints_long_only_no_delay",
+        "price_field": price_field,
         "is_full_execution_backtest": False,
         "tradable_source": tradable_source,
         "entry_block_source": limit_up_source,
@@ -448,6 +465,8 @@ def audit_price_scale_invariance(
     baseline_values: pd.Series | None = None,
     perturbed_feature_frame: pd.DataFrame | None = None,
     cross_sectional_mask: pd.Series | None = None,
+    perturbed_expression_memo: OrderedDict[str, pd.Series] | None = None,
+    expression_memo_limit: int = 0,
     relative_tolerance: float = 1e-8,
     absolute_tolerance: float = 1e-10,
 ) -> PriceScaleAudit:
@@ -481,6 +500,8 @@ def audit_price_scale_invariance(
         probe,
         spec,
         cross_sectional_mask=cross_sectional_mask,
+        external_memo=perturbed_expression_memo,
+        external_memo_limit=expression_memo_limit,
     )
     left = baseline.to_numpy(dtype=float)
     right = perturbed.to_numpy(dtype=float)
@@ -658,6 +679,22 @@ class FactorArtifact:
     validation_neutral_rank_ic: float
 
 
+@dataclass(frozen=True)
+class ParallelPreparedResult:
+    """Order-independent worker result committed by the parent evaluator.
+
+    Workers may calculate expressions, IC paths, neutralization and bootstrap
+    statistics concurrently.  They do not own the rolling novelty archive,
+    parent-score state, adaptive feedback, or persistent ledgers.  Those remain
+    parent-process responsibilities and are applied in candidate order.
+    """
+
+    score: CandidateScore
+    artifact: FactorArtifact | None
+    validation_signed_values: np.ndarray | None
+    validation_neutral_rank_values: np.ndarray | None
+
+
 class DevelopmentEvaluator:
     """Only owns train, purge and inner-validation data—never sealed rows."""
 
@@ -676,6 +713,7 @@ class DevelopmentEvaluator:
         terminal_label_bridge_identity: Mapping[str, object] | None = None,
         bootstrap_samples: int = 200,
         novelty_archive_limit: int = 64,
+        forecast_price_field: str = "vwap",
     ) -> None:
         max_dev = development_panel.index.get_level_values("date").max()
         if max_dev > split.development_end:
@@ -703,7 +741,11 @@ class DevelopmentEvaluator:
         self.min_names = min_names
         self.bootstrap_samples = bootstrap_samples
         self.novelty_archive_limit = novelty_archive_limit
+        if forecast_price_field not in {"open", "vwap"}:
+            raise ValueError("forecast_price_field must be open or vwap")
+        self.forecast_price_field = forecast_price_field
         self.spec = PRODUCTION_DSL_SPEC
+        self.python_factor_policy = PythonFactorSandboxPolicy()
         self.feature_frame = build_research_feature_frame(self.tape_panel)
         self._prefix_cutoff = split.validation_dates[
             len(split.validation_dates) // 2
@@ -719,29 +761,29 @@ class DevelopmentEvaluator:
         self._prefix_cross_sectional_mask = self.cross_sectional_mask.reindex(
             self._prefix_feature_frame.index
         )
-        # Labels must use the same point-in-time-adjusted return basis as the
-        # research prices.  Raw VWAP is reserved for cash execution; dividing
-        # raw prices across an ex-date would turn a corporate action into fake
-        # alpha or a fake crash.
+        # Ordinary labels use the same point-in-time-adjusted return basis as
+        # research prices. A sourced terminal exchange is valued separately
+        # from endpoint fields declared raw; their provenance is authenticated
+        # by the upstream frozen-tape lineage, not by this internal relation check.
         self.forecast_labels = forward_return(
-            self.feature_frame["vwap"],
+            self.feature_frame[self.forecast_price_field],
             split.label_horizon,
             entry_delay=split.entry_delay,
             trading_calendar=self.trading_calendar,
         )
         self.forecast_labels, terminal_label_audit = apply_terminal_label_bridges(
             self.forecast_labels,
-            self.tape_panel["vwap"],
+            self.tape_panel,
             self.panel.index,
             terminal_label_bridges,
+            terminal_label_bridge_identity=terminal_label_bridge_identity,
+            endpoint_price_field=self.forecast_price_field,
             horizon=split.label_horizon,
             entry_delay=split.entry_delay,
             trading_calendar=self.trading_calendar,
         )
-        if terminal_label_bridges and terminal_label_bridge_identity is None:
-            raise ValueError("terminal label bridges require a frozen catalog identity")
         self.terminal_label_bridge_identity = dict(
-            terminal_label_bridge_identity or {}
+            terminal_label_audit["terminal_label_bridge_identity"]
         )
         self.terminal_label_audit = terminal_label_audit
         # Backward-compatible alias: this is a forecast/mark-to-market target,
@@ -756,6 +798,7 @@ class DevelopmentEvaluator:
             horizon=split.label_horizon,
             entry_delay=split.entry_delay,
             trading_calendar=self.trading_calendar,
+            price_field=self.forecast_price_field,
         )
         self._member_forecast_labels = self.forecast_labels.reindex(
             self.panel.index
@@ -807,7 +850,7 @@ class DevelopmentEvaluator:
                 )
             if failures:
                 raise ValueError(
-                    "development adjusted-VWAP label coverage failed before search; "
+                    f"development adjusted-{self.forecast_price_field} label coverage failed before search; "
                     + ", ".join(failures[:5])
                 )
             mask_hash = hashlib.sha256(
@@ -879,6 +922,15 @@ class DevelopmentEvaluator:
             self.exposures, split.validation_dates
         )
         self._validation_index = self._validation_exposures.index
+        validation_dates = self._validation_index.get_level_values("date")
+        validation_codes, _ = pd.factorize(validation_dates, sort=False)
+        self._validation_rank_boundaries = np.concatenate(
+            (
+                np.array([0], dtype=np.int64),
+                np.flatnonzero(np.diff(validation_codes)).astype(np.int64) + 1,
+                np.array([len(validation_codes)], dtype=np.int64),
+            )
+        )
         self._neutralizer = PreparedCrossSectionalNeutralizer(
             self._validation_exposures,
             categorical=("industry",),
@@ -888,6 +940,29 @@ class DevelopmentEvaluator:
         self.scores: dict[str, CandidateScore] = {}
         self._control_ic_cache: dict[str, float] = {}
         self._novelty_values: list[pd.Series] = []
+        self._novelty_complete_ranks: list[np.ndarray | None] = []
+        # Residualized validation ranks support low-correlation parent pairing.
+        # Keep only a bounded recent working set: the current 96 children plus
+        # the previous parent pool and elites fit comfortably without retaining
+        # every million-row candidate path.
+        self._pair_rank_cache: OrderedDict[str, np.ndarray] = OrderedDict()
+        self._pair_rank_cache_limit = 256
+        # Parent pairs are queried repeatedly while 96 children are built.
+        # Their frozen validation rank vectors do not change, so memoize the
+        # exact scalar correlation instead of repeating 232 daily rank
+        # correlations for every child slot.
+        self._pair_correlation_cache: OrderedDict[frozenset[str], float] = (
+            OrderedDict()
+        )
+        self._pair_correlation_cache_limit = 4096
+        # These memos may reuse subexpressions only inside one candidate.  A
+        # cross-candidate LRU makes numerically borderline validation gates
+        # depend on which worker evaluated earlier candidates, so __call__
+        # clears every memo before beginning a new candidate.
+        self._full_expression_memo: OrderedDict[str, pd.Series] = OrderedDict()
+        self._prefix_expression_memo: OrderedDict[str, pd.Series] = OrderedDict()
+        self._scale_expression_memo: OrderedDict[str, pd.Series] = OrderedDict()
+        self._expression_memo_limit = 64
 
     def _rank_ic_mean(self, values: pd.Series, dates: Sequence[pd.Timestamp]) -> float:
         selected = _date_slice(values.reindex(self.panel.index), dates)
@@ -915,6 +990,8 @@ class DevelopmentEvaluator:
             self.feature_frame,
             self.spec,
             cross_sectional_mask=self.cross_sectional_mask,
+            external_memo=self._full_expression_memo,
+            external_memo_limit=self._expression_memo_limit,
         )
         # Crossover controls are built from already oriented parents and have
         # a direction of +1 by construction.  They must not use labels to pick
@@ -936,9 +1013,106 @@ class DevelopmentEvaluator:
         )
         if not self._novelty_values:
             return 1.0
-        correlations = [abs(factor_correlation(valid_values, old, min_names=self.min_names)) for old in self._novelty_values]
+        current_ranks = self._complete_daily_ranks(valid_values)
+        correlations: list[float] = []
+        for old, old_ranks in zip(
+            self._novelty_values, self._novelty_complete_ranks, strict=True
+        ):
+            if current_ranks is not None and old_ranks is not None:
+                correlations.append(
+                    abs(self._mean_complete_daily_rank_correlation(current_ranks, old_ranks))
+                )
+            else:
+                correlations.append(
+                    abs(factor_correlation(valid_values, old, min_names=self.min_names))
+                )
         finite = [value for value in correlations if np.isfinite(value)]
         return float(np.clip(1.0 - max(finite, default=0.0), 0.0, 1.0))
+
+    def _complete_daily_ranks(self, values: pd.Series) -> np.ndarray | None:
+        aligned = values.reindex(self._validation_index)
+        numeric = aligned.to_numpy(dtype=float, na_value=np.nan)
+        if not np.isfinite(numeric).all():
+            return None
+        ranked = aligned.groupby(level="date", sort=False).rank(
+            method="average", na_option="keep"
+        )
+        return ranked.to_numpy(dtype=float, na_value=np.nan)
+
+    def _mean_complete_daily_rank_correlation(
+        self,
+        left: np.ndarray,
+        right: np.ndarray,
+    ) -> float:
+        daily: list[float] = []
+        for start, stop in zip(
+            self._validation_rank_boundaries[:-1],
+            self._validation_rank_boundaries[1:],
+            strict=True,
+        ):
+            left_day = left[start:stop]
+            right_day = right[start:stop]
+            if len(left_day) < self.min_names:
+                continue
+            if np.unique(left_day).size < 2 or np.unique(right_day).size < 2:
+                continue
+            daily.append(float(np.corrcoef(left_day, right_day)[1, 0]))
+        return float(np.mean(daily)) if daily else float("nan")
+
+    def _store_pair_behavior(self, candidate_id: str, neutral: pd.Series) -> None:
+        aligned = neutral.reindex(self._validation_index)
+        ranked = aligned.groupby(level="date", sort=False).rank(
+            method="average", na_option="keep"
+        )
+        self._pair_rank_cache[candidate_id] = ranked.to_numpy(
+            dtype=np.float32, na_value=np.nan
+        )
+        self._pair_rank_cache.move_to_end(candidate_id)
+        while len(self._pair_rank_cache) > self._pair_rank_cache_limit:
+            evicted, _ = self._pair_rank_cache.popitem(last=False)
+            stale = [key for key in self._pair_correlation_cache if evicted in key]
+            for key in stale:
+                self._pair_correlation_cache.pop(key, None)
+
+    def residual_factor_correlation(self, left_id: str, right_id: str) -> float:
+        """Mean daily absolute Spearman correlation of neutralized factor paths."""
+
+        cache_key = frozenset((left_id, right_id))
+        cached = self._pair_correlation_cache.get(cache_key)
+        if cached is not None:
+            self._pair_correlation_cache.move_to_end(cache_key)
+            return cached
+        left = self._pair_rank_cache.get(left_id)
+        right = self._pair_rank_cache.get(right_id)
+        if left is None or right is None:
+            return 1.0
+        daily: list[float] = []
+        for start, stop in zip(
+            self._validation_rank_boundaries[:-1],
+            self._validation_rank_boundaries[1:],
+            strict=True,
+        ):
+            left_day = left[start:stop]
+            right_day = right[start:stop]
+            valid = np.isfinite(left_day) & np.isfinite(right_day)
+            if int(valid.sum()) < self.min_names:
+                continue
+            x = left_day[valid]
+            y = right_day[valid]
+            if np.unique(x).size < 2 or np.unique(y).size < 2:
+                continue
+            daily.append(float(np.corrcoef(x, y)[0, 1]))
+        value = float(np.mean(daily)) if daily else 1.0
+        if not np.isfinite(value):
+            return 1.0
+        self._pair_rank_cache.move_to_end(left_id)
+        self._pair_rank_cache.move_to_end(right_id)
+        result = float(abs(value))
+        self._pair_correlation_cache[cache_key] = result
+        self._pair_correlation_cache.move_to_end(cache_key)
+        while len(self._pair_correlation_cache) > self._pair_correlation_cache_limit:
+            self._pair_correlation_cache.popitem(last=False)
+        return result
 
     def _inner_validation_rank_behavior(self, candidate: Candidate) -> pd.Series:
         """Recompute one frozen candidate's validation-only rank path.
@@ -968,6 +1142,8 @@ class DevelopmentEvaluator:
             self.feature_frame,
             self.spec,
             cross_sectional_mask=self.cross_sectional_mask,
+            external_memo=self._full_expression_memo,
+            external_memo_limit=self._expression_memo_limit,
         )
         validation = _date_slice(
             (values * artifact.direction).reindex(self.panel.index),
@@ -1043,10 +1219,10 @@ class DevelopmentEvaluator:
         final_factors: int,
         policy: BehavioralChampionPolicy,
     ) -> ChampionSelectionResult:
-        """Greedily select a Plus family under a hard validation correlation cap.
+        """Greedily select an already-ranked family under a hard correlation cap.
 
-        Candidates are considered by descending development fitness.  A
-        bounded leading pool is scanned first; only when it cannot fill the
+        The caller owns the pre-registered ordering (fitness or Pareto/NSGA-II).
+        A bounded leading pool is scanned first; only when it cannot fill the
         requested family is the remainder of the passed archive considered.
         The threshold is never relaxed.  Only rank paths for accepted
         candidates remain live during selection, and all are released before
@@ -1055,10 +1231,7 @@ class DevelopmentEvaluator:
 
         if final_factors < 1:
             raise ValueError("final_factors must be positive")
-        ranked = sorted(
-            eligible,
-            key=lambda item: (-item.score.fitness, item.candidate.candidate_id),
-        )
+        ranked = list(eligible)
         if any(not item.score.passed for item in ranked):
             raise ValueError("behavioral champion gate accepts only passed candidates")
 
@@ -1254,6 +1427,13 @@ class DevelopmentEvaluator:
         )
 
     def __call__(self, candidate: Candidate) -> CandidateScore:
+        # Candidate validation must be a pure function of the candidate and
+        # frozen data.  In particular, worker-local LRU history may not change
+        # the price-scale gate or any downstream adaptive feedback.
+        self._full_expression_memo.clear()
+        self._prefix_expression_memo.clear()
+        self._scale_expression_memo.clear()
+        self._control_ic_cache.clear()
         try:
             candidate_id = candidate.candidate_id
             canonical_expression_json = canonical_json(
@@ -1261,6 +1441,19 @@ class DevelopmentEvaluator:
                 self.spec,
             )
             evaluated_expression = json.loads(canonical_expression_json)
+            python_factor_source = render_python_factor(
+                evaluated_expression, self.spec
+            )
+            parsed_python = parse_python_factor(
+                python_factor_source,
+                self.spec,
+                policy=self.python_factor_policy,
+            )
+            if (
+                canonical_json(parsed_python.expression, self.spec)
+                != canonical_expression_json
+            ):
+                return self._rejected("python_factor_round_trip_mismatch")
             canonical_expression_hash = expression_hash(
                 evaluated_expression,
                 self.spec,
@@ -1271,6 +1464,8 @@ class DevelopmentEvaluator:
                 self.feature_frame,
                 self.spec,
                 cross_sectional_mask=self.cross_sectional_mask,
+                external_memo=self._full_expression_memo,
+                external_memo_limit=self._expression_memo_limit,
             )
             # Prefix invariance is a dynamic complement to static DSL checks.
             prefix_values = evaluate_expression(
@@ -1278,6 +1473,8 @@ class DevelopmentEvaluator:
                 self._prefix_feature_frame,
                 self.spec,
                 cross_sectional_mask=self._prefix_cross_sectional_mask,
+                external_memo=self._prefix_expression_memo,
+                external_memo_limit=self._expression_memo_limit,
             )
             common = values.reindex(prefix_values.index)
             if not np.allclose(common.to_numpy(), prefix_values.to_numpy(), equal_nan=True, rtol=0.0, atol=1e-12):
@@ -1294,12 +1491,24 @@ class DevelopmentEvaluator:
                 baseline_values=values,
                 perturbed_feature_frame=self.price_scale_probe,
                 cross_sectional_mask=self.cross_sectional_mask,
+                perturbed_expression_memo=self._scale_expression_memo,
+                expression_memo_limit=self._expression_memo_limit,
             )
             if not scale_audit.invariant:
-                return self._rejected(
-                    f"price_scale_invariance_failed:{scale_audit.mismatch_rows}"
-                )
-        except (DSLValidationError, ValueError, KeyError, FloatingPointError) as exc:
+                # The gate decision is categorical.  A mismatch-row count is
+                # an implementation-order diagnostic: bounded expression LRU
+                # reuse can change the number of numerically borderline rows
+                # without changing the invariant/fail decision.  Feeding that
+                # incidental count into adaptive feedback would make otherwise
+                # equivalent serial and parallel runs carry different evidence.
+                return self._rejected("price_scale_invariance_failed")
+        except (
+            DSLValidationError,
+            PythonFactorValidationError,
+            ValueError,
+            KeyError,
+            FloatingPointError,
+        ) as exc:
             return self._rejected(f"dsl_or_runtime:{type(exc).__name__}:{exc}")
 
         train_raw_ic = self._rank_ic_mean(values, self.split.train_dates)
@@ -1443,8 +1652,11 @@ class DevelopmentEvaluator:
                 "ast_nodes": complexity,
                 "lookback": report.lookback,
                 "price_scale_audit": scale_audit.to_dict(),
+                "python_factor_source": python_factor_source,
+                "python_factor_source_sha256": parsed_python.source_sha256,
+                "python_factor_sandbox": dict(parsed_python.sandbox_policy),
                 "forecast_label_definition": (
-                    "adjusted_vwap_exact_frozen_calendar_endpoint_return_without_future_fill_conditioning"
+                    f"adjusted_{self.forecast_price_field}_exact_frozen_calendar_endpoint_return_without_future_fill_conditioning"
                 ),
                 "immediate_executable_label_definition": dict(
                     self.executable_label_definition
@@ -1473,9 +1685,136 @@ class DevelopmentEvaluator:
             validation_neutral_rank_ic=float(neutral_summary.mean),
         )
         self.scores[candidate_id] = score
+        self._store_pair_behavior(
+            candidate_id,
+            _date_slice(neutral, self.split.validation_dates),
+        )
         self._novelty_values.append(valid_signed)
+        self._novelty_complete_ranks.append(
+            self._complete_daily_ranks(valid_signed)
+        )
         if len(self._novelty_values) > self.novelty_archive_limit:
             self._novelty_values.pop(0)
+            self._novelty_complete_ranks.pop(0)
+        return score
+
+    def commit_parallel_result(
+        self,
+        candidate: Candidate,
+        prepared: ParallelPreparedResult,
+    ) -> CandidateScore:
+        """Commit a worker result with the exact serial ordering semantics."""
+
+        worker_score = prepared.score
+        if not worker_score.passed:
+            if prepared.artifact is not None or prepared.validation_signed_values is not None:
+                raise ValueError("rejected worker result contains passed-candidate state")
+            return worker_score
+        artifact = prepared.artifact
+        values = prepared.validation_signed_values
+        neutral_rank_values = prepared.validation_neutral_rank_values
+        if artifact is None or values is None or neutral_rank_values is None:
+            raise ValueError("passed worker result lacks artifact or validation values")
+        if (
+            len(values) != len(self._validation_index)
+            or len(neutral_rank_values) != len(self._validation_index)
+        ):
+            raise ValueError("worker validation values do not align with parent evaluator")
+        if (
+            artifact.candidate_id != candidate.candidate_id
+            or deterministic_candidate_id(candidate) != candidate.candidate_id
+            or canonical_json(candidate.expression, self.spec)
+            != artifact.canonical_expression_json
+        ):
+            raise ValueError("candidate identity changed between worker and ordered commit")
+
+        valid_signed = pd.Series(
+            np.asarray(values, dtype=float),
+            index=self._validation_index,
+            dtype=float,
+        )
+        novelty = self._novelty(valid_signed)
+        diagnostics = dict(worker_score.diagnostics)
+        neutral_summary = diagnostics.get("neutral_summary")
+        if not isinstance(neutral_summary, Mapping):
+            raise ValueError("passed worker result lacks neutral IC summary")
+        bootstrap_low = float(neutral_summary.get("bootstrap_low", np.nan))
+        if not np.isfinite(bootstrap_low):
+            raise ValueError("worker neutral bootstrap bound is non-finite")
+
+        comparator = -math.inf
+        parent_neutral = [
+            self.scores[parent].neutral_rank_ic
+            for parent in candidate.parents
+            if parent in self.scores
+        ]
+        if parent_neutral:
+            comparator = max(parent_neutral)
+        control_ic_raw = diagnostics.get("linear_control_neutral_rank_ic")
+        control_ic = (
+            float(control_ic_raw)
+            if control_ic_raw is not None and np.isfinite(float(control_ic_raw))
+            else None
+        )
+        if control_ic is not None:
+            comparator = max(comparator, control_ic)
+        control_delta = (
+            float(worker_score.neutral_rank_ic - comparator)
+            if comparator > -math.inf
+            else None
+        )
+
+        complexity = int(diagnostics.get("ast_nodes", -1))
+        if complexity < 1:
+            raise ValueError("passed worker result has invalid expression complexity")
+        fitness = (
+            0.38 * worker_score.neutral_rank_ic
+            + 0.17 * worker_score.signed_rank_ic
+            + 0.20 * worker_score.worst_window_ic
+            + 0.12 * bootstrap_low
+            + 0.006 * novelty
+            - 0.004 * worker_score.turnover
+            - 0.00008 * complexity
+        )
+        if control_delta is not None:
+            fitness += 0.15 * min(control_delta, 0.0) + 0.04 * max(
+                control_delta, 0.0
+            )
+        score = CandidateScore(
+            fitness=float(fitness),
+            signed_rank_ic=worker_score.signed_rank_ic,
+            neutral_rank_ic=worker_score.neutral_rank_ic,
+            turnover=worker_score.turnover,
+            worst_window_ic=worker_score.worst_window_ic,
+            style_retention=worker_score.style_retention,
+            novelty=novelty,
+            control_delta=control_delta,
+            passed=True,
+            diagnostics=diagnostics,
+        )
+        self.artifacts[candidate.candidate_id] = artifact
+        self.scores[candidate.candidate_id] = score
+        # The worker already computed this exact neutralized rank vector while
+        # producing the score. Reusing it avoids a redundant date-by-date
+        # linear solve in the serial commit path without changing any stateful
+        # novelty, parent comparison, or ledger ordering.
+        self._pair_rank_cache[candidate.candidate_id] = np.asarray(
+            neutral_rank_values,
+            dtype=np.float32,
+        ).copy()
+        self._pair_rank_cache.move_to_end(candidate.candidate_id)
+        while len(self._pair_rank_cache) > self._pair_rank_cache_limit:
+            evicted, _ = self._pair_rank_cache.popitem(last=False)
+            stale = [key for key in self._pair_correlation_cache if evicted in key]
+            for key in stale:
+                self._pair_correlation_cache.pop(key, None)
+        self._novelty_values.append(valid_signed)
+        self._novelty_complete_ranks.append(
+            self._complete_daily_ranks(valid_signed)
+        )
+        if len(self._novelty_values) > self.novelty_archive_limit:
+            self._novelty_values.pop(0)
+            self._novelty_complete_ranks.pop(0)
         return score
 
 
@@ -1497,6 +1836,7 @@ class SealedGate:
         sealed_claim_capability: object | None = None,
         terminal_label_bridges: Sequence[TerminalLabelBridge] = (),
         terminal_label_bridge_identity: Mapping[str, object] | None = None,
+        forecast_price_field: str = "vwap",
     ) -> None:
         self._panel = full_panel.sort_index()
         self._tape_panel = (
@@ -1576,11 +1916,16 @@ class SealedGate:
         self._revealed = False
         self._composite_reveal: dict[str, object] | None = None
         self._spec = PRODUCTION_DSL_SPEC
-        if terminal_label_bridges and terminal_label_bridge_identity is None:
-            raise ValueError("terminal label bridges require a frozen catalog identity")
+        if forecast_price_field not in {"open", "vwap"}:
+            raise ValueError("forecast_price_field must be open or vwap")
+        self._forecast_price_field = forecast_price_field
         self._terminal_label_bridges = tuple(terminal_label_bridges)
-        self._terminal_label_bridge_identity = dict(
-            terminal_label_bridge_identity or {}
+        self._terminal_label_bridge_identity = (
+            validate_terminal_label_bridge_identity(
+                self._terminal_label_bridges, terminal_label_bridge_identity
+            )
+            if self._terminal_label_bridges
+            else {}
         )
 
     @property
@@ -1603,16 +1948,18 @@ class SealedGate:
             raise RuntimeError("sealed gate has already been revealed and is now retired")
         self._revealed = True
         labels = forward_return(
-            self._feature_frame["vwap"],
+            self._feature_frame[self._forecast_price_field],
             self._split.label_horizon,
             entry_delay=self._split.entry_delay,
             trading_calendar=self._trading_calendar,
         )
         labels, terminal_label_audit = apply_terminal_label_bridges(
             labels,
-            self._tape_panel["vwap"],
+            self._tape_panel,
             self._panel.index,
             self._terminal_label_bridges,
+            terminal_label_bridge_identity=self._terminal_label_bridge_identity,
+            endpoint_price_field=self._forecast_price_field,
             horizon=self._split.label_horizon,
             entry_delay=self._split.entry_delay,
             trading_calendar=self._trading_calendar,
@@ -1624,6 +1971,7 @@ class SealedGate:
                 horizon=self._split.label_horizon,
                 entry_delay=self._split.entry_delay,
                 trading_calendar=self._trading_calendar,
+                price_field=self._forecast_price_field,
             )
         )
         endpoint_availability = summarize_endpoint_availability(
@@ -1647,7 +1995,7 @@ class SealedGate:
             or (forecast_daily["sum"] != forecast_daily["size"]).any()
         ):
             raise ValueError(
-                "sealed adjusted-VWAP forecast labels are not 100% complete"
+                f"sealed adjusted-{self._forecast_price_field} forecast labels are not 100% complete"
             )
         sealed_forecast_label_audit = {
             "rule_identity": research_rule_identity_v1(),
@@ -1838,7 +2186,7 @@ class SealedGate:
                     "direction_frozen_in_train": artifact.direction,
                     "development_neutral_rank_ic": artifact.validation_neutral_rank_ic,
                     "forecast_label_definition": (
-                        "adjusted_vwap_exact_frozen_calendar_endpoint_return_without_future_fill_conditioning"
+                        f"adjusted_{self._forecast_price_field}_exact_frozen_calendar_endpoint_return_without_future_fill_conditioning"
                     ),
                     "sealed_raw": raw.to_dict(),
                     "sealed_neutral": neutral_result.to_dict(),

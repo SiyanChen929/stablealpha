@@ -1,0 +1,186 @@
+schema_version: '1.0'
+profile_id: cogalpha_track_a_fixed_qlib_20260909
+profile_version: '2026-09-09'
+claim: fixed_qlib_disclosed_paper_settings_with_explicit_undisclosed_snapshot_limits
+data:
+  primary_track: fixed_qlib_csi300
+  selection_from_test_results: forbidden
+  provider: fixed_community_Qlib_binary_snapshot
+  archive_sha256: 482e0575669a11a7d34585cca77912baf7e367962570bdf9c19017c356ffd222
+  development_input_complete_sha256: 534d4d54f008377b49ad430cefdd3966b59f674eddd700d214ac86609005b65b
+  style_complete_sha256: c45b3a9a7d893458030a36be3671aa610f9da4981de1fb181c8032649a0908b5
+  historical_development_union_symbols: 655
+  decision_member_rows: 729600
+  membership: dated_fixed_snapshot_not_current_constituents
+  watermark: RESEARCH_PROXY_ONLY
+  style_quality: current_vintage_historical_industry_and_turnover_implied_float_cap_proxy
+dates:
+  train_start: '2011-01-01'
+  train_end: '2019-12-31'
+  validation_start: '2020-01-01'
+  validation_end: '2020-12-31'
+  test_start: '2021-01-01'
+  test_end: '2024-12-31'
+  purge_trading_days: 11
+  sealed_test_reveal_count: 1
+label:
+  name: future_10d_open_to_open
+  signal_time: t_close
+  entry: open_t_plus_1
+  exit: open_t_plus_11
+  formula: adjusted_open_t_plus_11_div_adjusted_open_t_plus_1_minus_1
+  horizon_trading_days: 10
+  entry_delay_trading_days: 1
+  missing_endpoint_policy: missing_no_forward_fill
+  terminal_bridge_policy: no_unsourced_endpoint_replacement
+  observed_label_policy_sha256: 4377ec38d7bc778c9eee4b367d15c08f0277e4e749e4c3e56b2bd54f0711a535
+  loss_and_ic_sample: observed_targets_only; preserve_full_primary_decision_rows_and_daily_missing_counts
+factor_search:
+  levels: 7
+  roles: 21
+  initial_population: 80
+  parent_pool: 32
+  children_per_generation: 96
+  generations: 24
+  subcycles: 3
+  generations_per_subcycle: 8
+  elite_carry: 2
+  final_factors: 20
+  codex_feedback_each_generation: true
+  feedback_fields:
+  - rejection_class
+  - train_raw_rank_ic
+  - validation_raw_rank_ic
+  - validation_neutral_rank_ic
+  - stability
+  - novelty
+  - turnover
+  - parent_delta
+  sealed_feedback: forbidden
+  semantic_repair: realtime_from_sanitized_feedback
+  parent_pairing: minimum_validation_residual_rank_correlation_within_quality_pool
+  selection:
+    algorithm: deterministic_nsga2
+    objectives_maximize:
+    - raw_rank_ic
+    - neutral_rank_ic
+    - stability
+    - novelty
+    - turnover_efficiency
+    - parent_delta
+    hard_constraints:
+      minimum_coverage: 0.7
+      predeclared_direction: true
+      price_scale_invariance: true
+      chronological_only: true
+  independent_panel:
+    specialists: 21
+    leads: 7
+    model: gpt-5.6-sol
+    reasoning_effort: high
+    fork_turns: none
+    strict_coverage_from_generation: 1
+    context: hash_bound_sanitized_feedback_and_mechanism_cards_only
+    single_role_retry: immutable_failed_attempt_plus_new_role_attempt
+    lead_reference_mode: exact_directive_id_selection
+    invocation_proof: procedural_tool_record_not_platform_signed
+  bootstrap_samples: 200
+python_factor_sandbox:
+  representation: single_factor_ctx_function
+  execution_mode: ast_lowering_without_exec_or_eval
+  network: denied
+  filesystem: no_generated_code_access
+  data: read_only_in_memory_view
+  max_source_bytes: 16384
+  max_ast_nodes: 256
+  cpu_seconds_per_worker: 7200
+  memory_bytes_per_worker: 8589934592
+  workers: 3
+  audited_extensions:
+  - ts_spectral_ratio
+  - ts_cusum
+  - ts_sign_entropy
+  - ts_state_transition
+  - cs_residual
+  pool_lifetime: one_ordered_candidate_batch; fresh_workers_per_batch
+  memory_enforcement: structural_bounded_tapes_caches_AST_and_three_workers; no_macos_RLIMIT_DATA
+factor_metrics:
+  paper_primary: raw_daily_spearman_rank_ic
+  neutralization_in_paper_primary: false
+  development_secondary:
+  - industry_and_style_neutral_rank_ic
+  - hac_icir
+  - moving_block_bootstrap_lower_bound
+  - turnover
+  - novelty
+  - parent_and_linear_control_delta
+models:
+  refit_schedule_trading_days: 126
+  refit_training_window: expanding_past_only
+  refit_label_purge_trading_days: 11
+  feature_transform: daily_cross_sectional_rank_normalization
+  sample_weight: equal_date_weight
+  ridge:
+    alpha: 10.0
+    fit_intercept: true
+  lightgbm:
+    objective: regression
+    learning_rate: 0.0001
+    n_estimators: 1000
+    num_leaves: 32
+    max_depth: 12
+    reg_alpha: 1.0
+    reg_lambda: 1.0
+    subsample: 0.8
+    subsample_freq: 1
+    colsample_bytree: 0.8
+    deterministic: true
+    force_col_wise: true
+    n_jobs: 3
+    random_state: 17
+  unresolved_paper_defaults:
+  - min_child_samples
+  - boosting_type
+  - exact_early_stopping_behavior
+portfolio:
+  rebalance: daily
+  selection: top_50
+  drop: 5
+  entry_price: next_open
+  benchmark: CSI300
+  initial_capital_cny: 1000000
+  board_lot: 100
+  open_cost_rate: 0.0005
+  close_cost_rate: 0.0015
+  minimum_commission_cny: 5.0
+  stamp_duty_in_close_cost: included_as_paper_aggregate
+  execution_fail_closed_on:
+  - suspension
+  - price_limit
+  - missing_open
+reproducibility:
+  seed: 17
+  reference_pyqlib_version: 0.9.7
+  scoring_implementation: local_audited_Qlib_field_adapter
+  freeze_before_search:
+  - config_sha256
+  - source_manifest_sha256
+  - implementation_sha256
+  - seed_factor_cards_sha256
+  - test_date_hash
+  persist_every_candidate: true
+  persist_every_failure: true
+  persist_sanitized_feedback: true
+  persist_codex_generation_response: true
+  persist_lineage: true
+  one_time_test_reveal: true
+  preserve_original_A1_config_sha256: 0e84438cf20c5550abeb26c22ae320f8cb30adf6118803136fb9ec1bff17cb85
+known_non_parity:
+- author_runtime_code_not_public
+- author_exact_dataset_snapshot_not_public
+- author_model_checkpoint_not_used
+- author_complete_generated_factor_archive_not_public
+- community_qlib_snapshot_current_vintage_not_certified_PIT
+- five_style_controls_are_local_secondary_proxies
+- free_form_python_is_lowered_to_audited_DSL_not_arbitrary_exec
+- rolling_model_and_execution_defaults_unresolved_as_listed

@@ -11,7 +11,7 @@ from cogalpha_plus.evolution import (
     Candidate,
     CandidateScore,
     ChampionSelectionResult,
-    CodexSeedInjectionFactory,
+    LLMSeedInjectionFactory,
     EvaluatedCandidate,
     EvolutionEngine,
     FeedbackDirective,
@@ -84,7 +84,7 @@ def test_evolution_preserves_or_explicitly_reorients_hypothesis_direction():
 
 def test_real_injections_are_unique_codex_card_derivatives_not_generic_templates():
     seeds = TemplateCandidateFactory(seed=301).generate(20)
-    factory = CodexSeedInjectionFactory(seeds, seed=302)
+    factory = LLMSeedInjectionFactory(seeds, seed=302)
     injected = factory.generate(12, generation=2)
     seed_hashes = {item.expression_hash for item in seeds}
     assert len({item.expression_hash for item in injected}) == 12
@@ -129,7 +129,7 @@ def test_precommitted_codex_injection_prefers_live_role_and_repair_without_rewri
         card.candidate_id = deterministic_candidate_id(card)
         cards.append(card)
 
-    factory = CodexSeedInjectionFactory(
+    factory = LLMSeedInjectionFactory(
         seeds,
         injection_cards=cards,
         seed=402,
@@ -233,7 +233,7 @@ def test_precommitted_ast_reservation_prevents_early_evolution_consumption():
         card.candidate_id = deterministic_candidate_id(card)
         cards.append(card)
 
-    factory = CodexSeedInjectionFactory(
+    factory = LLMSeedInjectionFactory(
         seeds,
         injection_cards=cards,
         seed=421,
@@ -351,7 +351,7 @@ def test_full_codex_budget_has_complete_typed_operator_yield():
         return score(candidate)
 
     budget = SearchBudget()
-    injection_factory = CodexSeedInjectionFactory(
+    injection_factory = LLMSeedInjectionFactory(
         seeds,
         injection_cards=injection_cards,
         seed=1701,
@@ -763,6 +763,105 @@ def test_plus_and_faithful_have_equal_candidate_budget_but_only_plus_adapts():
     assert faithful.champion_selection["mode"] == "faithful_fitness_rank"
 
 
+def test_codex_reviews_every_generation_and_controls_all_child_categories():
+    requests = []
+
+    def reviewer(generation, request):
+        requests.append(request)
+        decisions = []
+        for category in request["required_categories"]:
+            fix = request["allowed_fixes"][category][-1]
+            for parent_id in request["selected_parent_ids"]:
+                record = next(
+                    item
+                    for item in request["candidate_feedback"]
+                    if item["candidate_id"] == parent_id
+                )
+                decisions.append(
+                    {
+                        "category": category,
+                        "source_candidate_id": parent_id,
+                        "target_roles": [record["roles"][0]],
+                        "cause": "codex_reviewed_tradeoff",
+                        "fix": fix,
+                        "rationale": "Prefer a selected Pareto parent while preserving the fixed operator budget.",
+                    }
+                )
+        return {
+            "schema": "codex_generation_response_v1",
+            "generation": generation,
+            "request_sha256": request["request_sha256"],
+            "reviewer_model": "codex-test-reviewer",
+            "decisions": decisions,
+            "sealed_feedback_consumed": False,
+        }
+
+    budget = SearchBudget.tiny()
+    result = EvolutionEngine(
+        evaluator=lambda candidate: _feedback_score(),
+        factory=TemplateCandidateFactory(seed=812),
+        operators=MechanismAwareOperators(seed=812),
+        budget=budget,
+        mode="plus",
+        seed=812,
+        generation_reviewer=reviewer,
+    ).run()
+    assert [request["generation"] for request in requests] == [1, 2, 3, 4]
+    assert all(request["sealed_feedback_included"] is False for request in requests)
+    assert set(requests[0]["candidate_feedback"][0]) == {
+        "candidate_id",
+        "generation",
+        "operator",
+        "roles",
+        "mechanism_tags",
+        "parents",
+        "expression_hash",
+        "passed",
+        "rejection_class",
+        "train_raw_rank_ic",
+        "validation_raw_rank_ic",
+        "validation_neutral_rank_ic",
+        "stability",
+        "novelty",
+        "turnover",
+        "style_retention",
+        "coverage",
+        "parent_delta",
+    }
+    assert all(
+        summary["codex_generation_review"]["enabled"]
+        for summary in result.generations
+    )
+    assert all(
+        item.candidate.metadata.get("codex_generation_response_sha256")
+        for item in result.archive
+        if item.candidate.generation > 0
+    )
+
+
+def test_codex_generation_review_fails_closed_on_unbound_response():
+    def reviewer(generation, request):
+        return {
+            "schema": "codex_generation_response_v1",
+            "generation": generation,
+            "request_sha256": "0" * 64,
+            "reviewer_model": "codex-test-reviewer",
+            "decisions": [],
+            "sealed_feedback_consumed": False,
+        }
+
+    with pytest.raises(ValueError, match="request hash mismatch"):
+        EvolutionEngine(
+            evaluator=lambda candidate: _feedback_score(),
+            factory=TemplateCandidateFactory(seed=813),
+            operators=MechanismAwareOperators(seed=813),
+            budget=SearchBudget.tiny(),
+            mode="plus",
+            seed=813,
+            generation_reviewer=reviewer,
+        ).run()
+
+
 def test_feedback_reads_only_named_development_diagnostics_never_sealed_fields():
     class GuardedDiagnostics:
         def __init__(self):
@@ -842,6 +941,46 @@ def test_sanitized_feedback_changes_the_next_generation_repair_mechanism():
     assert turnover_hashes != style_hashes
 
 
+def test_audited_extensions_are_reachable_through_semantic_repair():
+    parent = load_codex_seed_candidates(Path(__file__).resolve().parents[1], horizon=10)[0]
+    operators = MechanismAwareOperators(seed=1904, max_nodes=48)
+    reached = set()
+    for generation in range(1, 241):
+        child = operators.mutate(
+            parent,
+            generation=generation,
+            mutation_class="semantic",
+            feedback_fix="nonlinear_refinement",
+        )
+        validate_expression(child.expression, PRODUCTION_DSL_SPEC)
+        reached.update(
+            node.get("op")
+            for node in _walk_for_test(child.expression)
+            if node.get("op")
+            in {
+                "ts_spectral_ratio",
+                "ts_cusum",
+                "ts_sign_entropy",
+                "ts_state_transition",
+                "cs_residual",
+            }
+        )
+    assert reached == {
+        "ts_spectral_ratio",
+        "ts_cusum",
+        "ts_sign_entropy",
+        "ts_state_transition",
+        "cs_residual",
+    }
+
+
+def _walk_for_test(expression):
+    yield expression
+    for arg in expression.get("args", []):
+        if isinstance(arg, dict):
+            yield from _walk_for_test(arg)
+
+
 def test_failure_memory_survives_generations_and_drives_repair_lineage():
     memory = AdaptiveFeedbackMemory()
 
@@ -905,7 +1044,7 @@ def test_21_role_memory_and_fresh_injection_repair_missing_islands():
     )
     result = EvolutionEngine(
         evaluator=lambda candidate: _feedback_score(),
-        factory=CodexSeedInjectionFactory(seeds, seed=451),
+        factory=LLMSeedInjectionFactory(seeds, seed=451),
         operators=MechanismAwareOperators(seed=451),
         budget=budget,
         mode="plus",

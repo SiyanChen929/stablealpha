@@ -1,0 +1,31 @@
+cff-version: 1.2.0
+message: "If you use this software or its results, please cite the paper below."
+title: "StableAlpha"
+type: software
+authors:
+  - family-names: Chen
+    given-names: Siyan
+    email: siyan_chen@ucsb.edu
+    affiliation: "University of California, Santa Barbara"
+license: MIT
+repository-code: "https://github.com/SiyanChen929/stablealpha"
+keywords:
+  - alpha discovery
+  - large language models
+  - search budget
+  - return prediction
+  - portfolio construction
+preferred-citation:
+  type: generic
+  title: "The Marginal Yield of LLM-Guided Alpha Search: Search Effort, Information and Investment Value"
+  authors:
+    - family-names: Chen
+      given-names: Siyan
+      affiliation: "University of California, Santa Barbara"
+  year: 2026
+  month: 10
+  publisher:
+    name: Zenodo
+  doi: "10.5281/zenodo.23379471"
+  url: "https://doi.org/10.5281/zenodo.23379471"
+  license: CC-BY-4.0

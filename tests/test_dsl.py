@@ -342,6 +342,80 @@ def test_rolling_correlation() -> None:
     np.testing.assert_allclose(result.dropna().to_numpy(), 1.0, atol=1e-12)
 
 
+def test_audited_trailing_extension_operators_are_causal_and_scale_invariant() -> None:
+    panel = make_panel(days=24)
+    returns = {"op": "return", "args": [field("close")], "periods": 1}
+    expressions = [
+        {"op": "ts_sign_entropy", "args": [returns], "window": 6},
+        {"op": "ts_cusum", "args": [returns], "window": 6},
+        {"op": "ts_spectral_ratio", "args": [returns], "window": 8},
+        {"op": "ts_state_transition", "args": [returns], "window": 6},
+    ]
+    scaled = panel.copy()
+    multipliers = scaled.index.get_level_values("symbol").map(
+        {"AAA": 0.01, "BBB": 7.0, "CCC": 200.0}
+    ).to_numpy(dtype=float)
+    scaled["close"] *= multipliers
+    scaled["open"] *= multipliers
+    cutoff = panel.index.get_level_values("date").unique()[16]
+    truncated = panel.loc[panel.index.get_level_values("date") <= cutoff]
+    for expression in expressions:
+        report = validate_expression(expression, PRODUCTION_SPEC)
+        assert report.lookback >= 6
+        full = evaluate_expression(expression, panel, PRODUCTION_SPEC)
+        rescaled = evaluate_expression(expression, scaled, PRODUCTION_SPEC)
+        pd.testing.assert_series_equal(
+            full, rescaled, check_names=False, check_exact=False, rtol=1e-10, atol=1e-10
+        )
+        partial = evaluate_expression(expression, truncated, PRODUCTION_SPEC)
+        pd.testing.assert_series_equal(
+            full.loc[partial.index], partial, check_names=False, check_exact=True
+        )
+
+
+def test_extension_window_lower_bounds_are_rejected() -> None:
+    returns = {"op": "return", "args": [field("close")], "periods": 1}
+    for op, window in (
+        ("ts_sign_entropy", 1),
+        ("ts_cusum", 1),
+        ("ts_state_transition", 1),
+        ("ts_spectral_ratio", 3),
+    ):
+        with pytest.raises(DSLValidationError, match="requires a window"):
+            validate_expression(
+                {"op": op, "args": [returns], "window": window}, RAW_SPEC
+            )
+
+
+def test_cross_sectional_residualization_removes_linear_exposure() -> None:
+    panel = make_panel(days=8)
+    raw = {
+        "op": "return",
+        "args": [field("close")],
+        "periods": 1,
+    }
+    exposure = {
+        "op": "return",
+        "args": [field("open")],
+        "periods": 1,
+    }
+    expression = {"op": "cs_residual", "args": [raw, exposure]}
+    validate_expression(expression, PRODUCTION_SPEC)
+    residual = evaluate_expression(expression, panel, PRODUCTION_SPEC)
+    for date, values in residual.groupby(level="date"):
+        aligned = pd.DataFrame(
+            {
+                "residual": values.droplevel("date"),
+                "exposure": evaluate_expression(
+                    exposure, panel, PRODUCTION_SPEC
+                ).xs(date, level="date"),
+            }
+        ).dropna()
+        if len(aligned) >= 3:
+            assert abs(float(aligned["residual"].mean())) < 1e-10
+            assert abs(float(aligned.cov(ddof=0).iloc[0, 1])) < 1e-10
+
+
 def test_truncation_invariance_proves_no_lookahead() -> None:
     panel = make_panel(days=16)
     expression = {

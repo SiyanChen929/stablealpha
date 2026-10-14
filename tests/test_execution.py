@@ -84,6 +84,26 @@ def test_execution_ignores_adjusted_prices_and_rejects_adjusted_marking():
         sim.mark_to_market(marked_state, snapshot, price_field="adj_close")
 
 
+def test_track_a_can_execute_at_raw_open_without_using_vwap():
+    snapshot = market()
+    snapshot["open"] = [11.0, 21.0, 31.0]
+    sim = ChinaAExecutionSimulator(
+        [FeeRegime(pd.Timestamp("2020-01-01"), None, 0.0005, 5.0, 0.001)],
+        ExecutionRules(
+            max_participation=1.0,
+            slippage_bps=0.0,
+            impact_coefficient=0.0,
+        ),
+        execution_price_field="open",
+    )
+    report = sim.execute(
+        "2024-01-02", pd.Series({"A": 0.5}), snapshot, PortfolioState(100_000.0)
+    )
+    fill = next(item for item in report.fills if item.symbol == "A")
+    assert fill.price == 11.0
+    assert fill.fees == max(5.0, fill.notional * 0.0005)
+
+
 def test_existing_odd_lot_can_be_fully_liquidated_but_buys_remain_board_lots():
     state = PortfolioState(cash=0.0, shares={"A": 150})
     report = simulator().execute("2024-01-02", pd.Series({"A": 0.0}), market(), state)

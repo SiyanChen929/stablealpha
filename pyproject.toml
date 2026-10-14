@@ -3,9 +3,12 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "cogalpha-plus"
+name = "stablealpha"
 version = "0.1.0"
-description = "Auditable CogAlpha-style factor evolution for personal quantitative portfolios"
+description = "LLM-guided alpha search with a safe factor DSL, strict validation and cost-aware A-share backtests"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Siyan Chen", email = "siyan_chen@ucsb.edu" }]
 requires-python = ">=3.11"
 dependencies = [
   "numpy>=1.26",
@@ -19,9 +22,14 @@ dependencies = [
 [project.optional-dependencies]
 production = ["lightgbm>=4.3", "pyqlib>=0.9.6"]
 data-baostock = ["baostock==0.9.3", "pyarrow>=15.0"]
+figures = ["matplotlib>=3.10,<4", "reportlab>=4.0,<5", "pypdf>=5,<7"]
 dev = ["pytest>=8.0"]
 
+[project.urls]
+Paper = "https://doi.org/10.5281/zenodo.23379471"
+
 [project.scripts]
+stablealpha = "cogalpha_plus.cli:main"
 cogalpha = "cogalpha_plus.cli:main"
 
 [tool.setuptools.packages.find]

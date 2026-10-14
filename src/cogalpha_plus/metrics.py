@@ -490,6 +490,9 @@ class _NeutralizationDateDesign:
     stop: int
     x: pd.DataFrame
     exposure_valid: pd.Series
+    exposure_valid_values: np.ndarray
+    complete_x: np.ndarray
+    complete_gram: np.ndarray
 
 
 class PreparedCrossSectionalNeutralizer:
@@ -543,6 +546,16 @@ class PreparedCrossSectionalNeutralizer:
             )
             x = x.replace([np.inf, -np.inf], np.nan)
             exposure_valid = x.notna().all(axis=1)
+            exposure_valid_values = exposure_valid.to_numpy(dtype=bool)
+            complete_x = np.column_stack(
+                [
+                    np.ones(int(exposure_valid_values.sum())),
+                    x.loc[exposure_valid].to_numpy(dtype=float),
+                ]
+            )
+            penalty = np.eye(complete_x.shape[1]) * 1e-8
+            penalty[0, 0] = 0.0
+            complete_gram = complete_x.T @ complete_x + penalty
             stop = offset + len(group)
             if not group.index.equals(self.index[offset:stop]):
                 raise ValueError(
@@ -554,6 +567,9 @@ class PreparedCrossSectionalNeutralizer:
                     stop=stop,
                     x=x,
                     exposure_valid=exposure_valid,
+                    exposure_valid_values=exposure_valid_values,
+                    complete_x=complete_x,
+                    complete_gram=complete_gram,
                 )
             )
             offset = stop
@@ -562,30 +578,34 @@ class PreparedCrossSectionalNeutralizer:
     def transform(self, scores: pd.Series) -> pd.Series:
         require_panel_index(scores)
         aligned = scores.reindex(self.index).astype(float)
-        pieces: list[pd.Series] = []
+        residual_values = np.full(len(aligned), np.nan, dtype=float)
         for design in self._designs:
             y = aligned.iloc[design.start : design.stop]
             valid = y.replace([np.inf, -np.inf], np.nan).notna()
             valid &= design.exposure_valid
-            residual = pd.Series(np.nan, index=y.index, dtype=float)
             if int(valid.sum()) >= max(
                 self.min_names, design.x.shape[1] + 2
             ):
-                xv = np.column_stack(
-                    [
-                        np.ones(int(valid.sum())),
-                        design.x.loc[valid].to_numpy(dtype=float),
-                    ]
-                )
-                penalty = np.eye(xv.shape[1]) * 1e-8
-                penalty[0, 0] = 0.0
+                valid_values = valid.to_numpy(dtype=bool)
+                if np.array_equal(valid_values, design.exposure_valid_values):
+                    xv = design.complete_x
+                    gram = design.complete_gram
+                else:
+                    xv = np.column_stack(
+                        [
+                            np.ones(int(valid.sum())),
+                            design.x.loc[valid].to_numpy(dtype=float),
+                        ]
+                    )
+                    penalty = np.eye(xv.shape[1]) * 1e-8
+                    penalty[0, 0] = 0.0
+                    gram = xv.T @ xv + penalty
                 yv = y.loc[valid].to_numpy(dtype=float)
-                beta = np.linalg.solve(
-                    xv.T @ xv + penalty, xv.T @ yv
-                )
-                residual.loc[valid] = yv - xv @ beta
-            pieces.append(residual)
-        result = pd.concat(pieces).sort_index()
+                beta = np.linalg.solve(gram, xv.T @ yv)
+                day_residual = np.full(len(y), np.nan, dtype=float)
+                day_residual[valid_values] = yv - xv @ beta
+                residual_values[design.start : design.stop] = day_residual
+        result = pd.Series(residual_values, index=self.index, dtype=float).sort_index()
         result.name = f"{scores.name or 'score'}_neutral"
         return result
 

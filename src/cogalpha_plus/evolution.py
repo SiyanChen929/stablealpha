@@ -763,7 +763,7 @@ class EvolutionResult:
 class TemplateCandidateFactory:
     """Deterministic seed/injection source and a non-LLM control arm.
 
-    Codex proposals can be loaded as Candidate objects instead. This factory is
+    LLM proposals can be loaded as Candidate objects instead. This factory is
     retained because an equal-budget symbolic baseline is necessary to measure
     whether model reasoning adds value.
     """
@@ -846,7 +846,7 @@ class TemplateCandidateFactory:
             # base hypothesis, not cosmetic scalar rewrites: cross-sectional
             # robustness, short persistence, slow-baseline surprise, or local
             # volatility normalization. They also form the equal-budget
-            # non-LLM control arm used to measure Codex's incremental value.
+            # non-LLM control arm used to measure LLM's incremental value.
             base = c.expression
             if variant == 1:
                 c.expression = unary("cs_rank", base)
@@ -932,7 +932,12 @@ class MechanismAwareOperators:
         options = (
             ["timescale", "robust_rank"]
             if mutation_class == "parameter"
-            else ["risk_scale", "persistence", "slow_baseline_surprise"]
+            else [
+                "risk_scale",
+                "persistence",
+                "slow_baseline_surprise",
+                "audited_extension",
+            ]
         )
         targeted_modes = {
             "shorten_lookback": "shorten_lookback",
@@ -940,8 +945,8 @@ class MechanismAwareOperators:
             "persistence_smoothing": "persistence",
             "style_robustification": "robust_rank",
             "stability_smoothing": "persistence",
-            "novelty_recombination": "slow_baseline_surprise",
-            "nonlinear_refinement": "risk_scale",
+            "novelty_recombination": "audited_extension",
+            "nonlinear_refinement": "audited_extension",
             "parameter_refinement": "timescale",
         }
         if feedback_fix is not None and feedback_fix not in targeted_modes:
@@ -1028,7 +1033,7 @@ class MechanismAwareOperators:
                 "ts_mean",
                 window=self.rng.choice((2, 3, 4, 5)),
             )
-        else:
+        elif mode == "slow_baseline_surprise":
             compact = _compact_expression(expression, max(6, (self.max_nodes - 3) // 2))
             slow = _insert_time_series_before_cross_section(
                 compact,
@@ -1036,6 +1041,52 @@ class MechanismAwareOperators:
                 window=self.rng.choice(self.WINDOWS[3:]),
             )
             expression = binary("sub", compact, slow)
+        else:
+            extension = self.rng.choice(
+                (
+                    "ts_spectral_ratio",
+                    "ts_cusum",
+                    "ts_sign_entropy",
+                    "ts_state_transition",
+                    "cs_residual",
+                )
+            )
+            if extension == "cs_residual":
+                compact = _compact_expression(expression, max(6, self.max_nodes - 16))
+                exposure_family = self.rng.choice(("volatility", "liquidity", "momentum"))
+                close = field_expr("close")
+                if exposure_family == "volatility":
+                    exposure = unary(
+                        "ts_std", unary("return", close, periods=1), window=20
+                    )
+                elif exposure_family == "liquidity":
+                    amount = field_expr("amount")
+                    exposure = binary(
+                        "div", amount, unary("ts_mean", amount, window=20)
+                    )
+                else:
+                    exposure = unary("return", close, periods=20)
+                expression = binary(
+                    "cs_residual",
+                    unary("cs_zscore", compact),
+                    unary("cs_zscore", exposure),
+                )
+            else:
+                # The base mechanism appears once as the signal and once
+                # inside the state statistic, so budget for both copies.
+                compact = _compact_expression(
+                    expression, max(6, (self.max_nodes - 8) // 2)
+                )
+                window = self.rng.choice((10, 20, 40, 60))
+                statistic = _insert_time_series_before_cross_section(
+                    compact, extension, window=window
+                )
+                if extension in {"ts_sign_entropy", "ts_state_transition"}:
+                    gate = binary("sub", const_expr(1.0), statistic)
+                else:
+                    gate = binary("add", const_expr(0.25), statistic)
+                expression = binary("mul", compact, gate)
+            mode = f"audited_extension_{extension}"
         mutation_label = f"feedback_{mode}" if feedback_fix is not None else mode
         candidate = Candidate(
             expression=expression,
@@ -1224,7 +1275,7 @@ def _walk_nodes(expression: Expression) -> list[Expression]:
     return nodes
 
 
-_CROSS_SECTIONAL_OPERATORS = frozenset({"cs_rank", "cs_zscore"})
+_CROSS_SECTIONAL_OPERATORS = frozenset({"cs_rank", "cs_zscore", "cs_residual"})
 _TIME_SERIES_OPERATORS = frozenset(
     {
         "lag",
@@ -1236,6 +1287,10 @@ _TIME_SERIES_OPERATORS = frozenset(
         "ts_min",
         "ts_max",
         "ts_corr",
+        "ts_sign_entropy",
+        "ts_cusum",
+        "ts_spectral_ratio",
+        "ts_state_transition",
     }
 )
 _PRICE_SCALE_FIELDS = frozenset({"open", "high", "low", "close", "vwap"})
@@ -1325,12 +1380,21 @@ def _semantic_type(expression: Expression) -> _SemanticType | None:
             if len(degrees) == 2
             else None
         )
+    if op in {
+        "ts_sign_entropy",
+        "ts_cusum",
+        "ts_spectral_ratio",
+        "ts_state_transition",
+    }:
+        return _SemanticType(Fraction(0), contains_cross_sectional)
     if op in _CROSS_SECTIONAL_OPERATORS:
-        return (
-            _SemanticType(Fraction(0), True)
-            if degrees[0] == 0
-            else None
-        )
+        if op == "cs_residual":
+            return (
+                _SemanticType(Fraction(0), True)
+                if len(degrees) == 2 and degrees[0] == 0 and degrees[1] == 0
+                else None
+            )
+        return _SemanticType(Fraction(0), True) if degrees[0] == 0 else None
     return None
 
 
@@ -1599,11 +1663,11 @@ def _different_scales(left: set[str], right: set[str]) -> bool:
     return ("short_scale" in left and "long_scale" in right) or ("long_scale" in left and "short_scale" in right)
 
 
-class CodexSeedInjectionFactory:
-    """Create independent injections from frozen Codex Factor Cards.
+class LLMSeedInjectionFactory:
+    """Create independent injections from frozen LLM Factor Cards.
 
     Real-data Plus runs draw each injection exactly once from a second,
-    precommitted Codex library. Sanitized development feedback may select an
+    precommitted LLM library. Sanitized development feedback may select an
     under-covered role and repair class, but it cannot rewrite the chosen AST.
     The older type-safe mutation of generation-zero cards remains available as
     an explicitly labelled fallback for synthetic tests and control studies.
@@ -1620,7 +1684,7 @@ class CodexSeedInjectionFactory:
         max_nodes: int = 48,
     ) -> None:
         if not seeds:
-            raise ValueError("Codex injection factory requires at least one Factor Card")
+            raise ValueError("LLM injection factory requires at least one Factor Card")
         self.seeds = tuple(deepcopy(item) for item in seeds)
         self.injection_cards = tuple(
             deepcopy(item) for item in (injection_cards or ())
@@ -1630,11 +1694,11 @@ class CodexSeedInjectionFactory:
         self._emitted_hashes = {item.expression_hash for item in seeds}
         injection_hashes = [item.expression_hash for item in self.injection_cards]
         if len(set(injection_hashes)) != len(injection_hashes):
-            raise ValueError("Codex adaptive injection cards must be structurally unique")
+            raise ValueError("LLM adaptive injection cards must be structurally unique")
         overlap = self._emitted_hashes.intersection(injection_hashes)
         if overlap:
             raise ValueError(
-                "Codex adaptive injection cards duplicate generation-zero seeds"
+                "LLM adaptive injection cards duplicate generation-zero seeds"
             )
         self._unused_injection_ids = {
             item.candidate_id for item in self.injection_cards
@@ -1655,7 +1719,7 @@ class CodexSeedInjectionFactory:
             if item.candidate_id in self._unused_injection_ids
         ]
         if not available:
-            raise RuntimeError("precommitted Codex adaptive injection library is exhausted")
+            raise RuntimeError("precommitted LLM adaptive injection library is exhausted")
         target_roles = set(() if feedback is None else feedback.target_roles)
         repair_tag = None if feedback is None else self._repair_tag(feedback.fix)
 
@@ -1746,7 +1810,7 @@ class CodexSeedInjectionFactory:
                 digest = child.expression_hash
                 if digest in self._emitted_hashes:
                     raise RuntimeError(
-                        "precommitted Codex injection unexpectedly duplicates an "
+                        "precommitted LLM injection unexpectedly duplicates an "
                         "already evaluated expression"
                     )
                 self._emitted_hashes.add(digest)
@@ -1795,7 +1859,7 @@ class CodexSeedInjectionFactory:
             child.candidate_id = deterministic_candidate_id(child)
             candidates.append(child)
         if len(candidates) != count:
-            raise RuntimeError("could not generate enough unique Codex-derived injections")
+            raise RuntimeError("could not generate enough unique LLM-derived injections")
         return candidates
 
 
@@ -1806,12 +1870,16 @@ class EvolutionEngine:
         self,
         *,
         evaluator: Callable[[Candidate], CandidateScore],
-        factory: TemplateCandidateFactory | CodexSeedInjectionFactory,
+        factory: TemplateCandidateFactory | LLMSeedInjectionFactory,
         operators: MechanismAwareOperators,
         budget: SearchBudget | None = None,
         mode: str = "plus",
         seed: int = 17,
         on_evaluated: Callable[[EvaluatedCandidate], None] | None = None,
+        batch_evaluator: Callable[
+            [Sequence[Candidate]], Sequence[CandidateScore]
+        ]
+        | None = None,
         feedback_memory: AdaptiveFeedbackMemory | None = None,
         champion_selector: Callable[
             [Sequence[EvaluatedCandidate], int, BehavioralChampionPolicy],
@@ -1820,6 +1888,15 @@ class EvolutionEngine:
         | None = None,
         behavioral_champion_policy: BehavioralChampionPolicy | None = None,
         on_terminal_audit: Callable[[Mapping[str, object]], None] | None = None,
+        multiobjective_ranker: Callable[
+            [Sequence[EvaluatedCandidate]], Sequence[EvaluatedCandidate]
+        ]
+        | None = None,
+        residual_pair_correlation: Callable[[str, str], float] | None = None,
+        generation_reviewer: Callable[
+            [int, Mapping[str, object]], Mapping[str, object]
+        ]
+        | None = None,
     ) -> None:
         if mode not in {"faithful", "plus"}:
             raise ValueError("mode must be faithful or plus")
@@ -1830,7 +1907,13 @@ class EvolutionEngine:
         self.mode = mode
         self.rng = random.Random(seed)
         self.on_evaluated = on_evaluated
+        self.batch_evaluator = batch_evaluator
         self.on_terminal_audit = on_terminal_audit
+        self.multiobjective_ranker = multiobjective_ranker
+        self.residual_pair_correlation = residual_pair_correlation
+        self.generation_reviewer = generation_reviewer
+        self._active_codex_directives: dict[str, tuple[FeedbackDirective, ...]] = {}
+        self._active_codex_response_hash: str | None = None
         self.terminal_audit: Mapping[str, object] = {}
         if mode == "faithful" and (
             champion_selector is not None or behavioral_champion_policy is not None
@@ -1892,7 +1975,7 @@ class EvolutionEngine:
             self.on_terminal_audit(self.terminal_audit)
 
     def _evaluate_unique(self, candidates: Iterable[Candidate], seen: set[str]) -> list[EvaluatedCandidate]:
-        evaluated: list[EvaluatedCandidate] = []
+        unique: list[Candidate] = []
         for candidate in candidates:
             digest = candidate.expression_hash
             is_precommitted_injection = (
@@ -1905,14 +1988,25 @@ class EvolutionEngine:
                 digest in self._reserved_injection_hashes
                 and not is_precommitted_injection
             ):
-                # A future Codex card is a reserved trial.  Letting an earlier
+                # A future LLM card is a reserved trial.  Letting an earlier
                 # mutation/crossover consume the same AST would make the
                 # without-replacement 96-slot schedule exhaust early.
                 continue
             if digest in seen:
                 continue
             seen.add(digest)
-            result = EvaluatedCandidate(candidate, self.evaluator(candidate))
+            unique.append(candidate)
+        if self.batch_evaluator is None:
+            scores = [self.evaluator(candidate) for candidate in unique]
+        else:
+            scores = list(self.batch_evaluator(unique))
+            if len(scores) != len(unique):
+                raise RuntimeError(
+                    "batch evaluator returned a different number of scores"
+                )
+        evaluated: list[EvaluatedCandidate] = []
+        for candidate, score in zip(unique, scores, strict=True):
+            result = EvaluatedCandidate(candidate, score)
             evaluated.append(result)
             if self.on_evaluated:
                 self.on_evaluated(result)
@@ -1922,7 +2016,17 @@ class EvolutionEngine:
         eligible = [item for item in pool if item.score.passed]
         if len(eligible) < self.budget.parent_pool:
             eligible = list(pool)
-        ranked = sorted(eligible, key=lambda item: item.score.fitness, reverse=True)
+        ranked = (
+            list(self.multiobjective_ranker(eligible))
+            if self.mode == "plus" and self.multiobjective_ranker is not None
+            else sorted(eligible, key=lambda item: item.score.fitness, reverse=True)
+        )
+        if (
+            len(ranked) != len(eligible)
+            or {item.candidate.candidate_id for item in ranked}
+            != {item.candidate.candidate_id for item in eligible}
+        ):
+            raise RuntimeError("multiobjective ranker must return each eligible parent once")
         if self.mode == "faithful":
             return ranked[: self.budget.parent_pool]
 
@@ -1958,7 +2062,17 @@ class EvolutionEngine:
                     continue
                 tags = item.candidate.mechanism_tags
                 crowding = sum(represented.get(tag, 0) for tag in tags) / max(len(tags), 1)
-                value = item.score.fitness + 0.0025 * item.score.novelty - 0.00025 * crowding
+                if self.multiobjective_ranker is None:
+                    value = (
+                        item.score.fitness
+                        + 0.0025 * item.score.novelty
+                        - 0.00025 * crowding
+                    )
+                else:
+                    # Preserve the Pareto/NSGA-II ordering while using a small
+                    # mechanism crowding penalty only inside the same ordered
+                    # quality band.
+                    value = -float(ranked.index(item)) - 0.00025 * crowding
                 if value > best_value:
                     best, best_value = item, value
             if best is None:
@@ -2031,6 +2145,9 @@ class EvolutionEngine:
                 parent_roles=parent_roles,
                 eligible_target_roles=eligible_target_roles,
             )
+        reviewed = self._active_codex_directives.get(category, ())
+        if reviewed:
+            directive = reviewed[slot % len(reviewed)]
         if category == "deterministic_mutation":
             parent = self._feedback_parent(parents, directive, slot)
             candidate = self.operators.mutate(
@@ -2075,6 +2192,11 @@ class EvolutionEngine:
             candidate.metadata = {
                 **candidate.metadata,
                 "adaptive_feedback": directive.to_dict(),
+            }
+        if self._active_codex_response_hash is not None:
+            candidate.metadata = {
+                **candidate.metadata,
+                "codex_generation_response_sha256": self._active_codex_response_hash,
             }
         candidate.candidate_id = deterministic_candidate_id(candidate)
         return candidate
@@ -2136,10 +2258,17 @@ class EvolutionEngine:
         directive: FeedbackDirective | None,
         slot: int,
     ) -> tuple[EvaluatedCandidate, EvaluatedCandidate]:
-        if directive is None:
+        if directive is None and self.residual_pair_correlation is None:
             left, right = self.rng.sample(list(parents), 2)
             return left, right
-        left = self._feedback_parent(parents, directive, slot)
+        left = (
+            sorted(
+                parents,
+                key=lambda item: (-item.score.fitness, item.candidate.candidate_id),
+            )[slot % len(parents)]
+            if directive is None
+            else self._feedback_parent(parents, directive, slot)
+        )
         left_tags = set(left.candidate.mechanism_tags)
         alternatives = [
             item
@@ -2149,14 +2278,26 @@ class EvolutionEngine:
         ordered = sorted(
             alternatives,
             key=lambda item: (
-                -self._pair_metric(item, directive),
+                (
+                    self.residual_pair_correlation(
+                        left.candidate.candidate_id,
+                        item.candidate.candidate_id,
+                    )
+                    if self.residual_pair_correlation is not None
+                    else 0.0
+                ),
+                -(
+                    item.score.fitness
+                    if directive is None
+                    else self._pair_metric(item, directive)
+                ),
                 len(left_tags.intersection(item.candidate.mechanism_tags)),
                 item.candidate.candidate_id,
             ),
         )
         # Rotate among the best half to retain deterministic variety while the
         # leading sort key still implements the requested repair objective.
-        band = ordered[: max(2, len(ordered) // 2)]
+        band = ordered[: max(2, min(8, len(ordered) // 2))]
         right = band[slot % len(band)]
         return left, right
 
@@ -2168,6 +2309,277 @@ class EvolutionEngine:
                     self._generate_one(category, parents, generation, slot)
                 )
         return children
+
+    @staticmethod
+    def _sanitized_candidate_feedback(
+        item: EvaluatedCandidate,
+    ) -> dict[str, object]:
+        """Expose only pre-registered train/validation scalars to LLM."""
+
+        score = item.score
+        diagnostics = score.diagnostics
+        rejection = diagnostics.get("rejection")
+        coverage = diagnostics.get("coverage")
+        train_raw = diagnostics.get("train_raw_rank_ic")
+
+        def finite(value: object) -> float | None:
+            try:
+                result = float(value)
+            except (TypeError, ValueError):
+                return None
+            return result if math.isfinite(result) else None
+
+        return {
+            "candidate_id": item.candidate.candidate_id,
+            "generation": int(item.candidate.generation),
+            "operator": item.candidate.operator,
+            "roles": list(candidate_roles(item.candidate)),
+            "mechanism_tags": list(item.candidate.mechanism_tags),
+            "parents": list(item.candidate.parents),
+            "expression_hash": item.candidate.expression_hash,
+            "passed": bool(score.passed),
+            "rejection_class": (
+                None if rejection is None else str(rejection).split(":", 1)[0]
+            ),
+            "train_raw_rank_ic": finite(train_raw),
+            "validation_raw_rank_ic": float(score.signed_rank_ic),
+            "validation_neutral_rank_ic": float(score.neutral_rank_ic),
+            "stability": float(score.worst_window_ic),
+            "novelty": float(score.novelty),
+            "turnover": float(score.turnover),
+            "style_retention": float(score.style_retention),
+            "coverage": finite(coverage),
+            "parent_delta": (
+                None if score.control_delta is None else float(score.control_delta)
+            ),
+        }
+
+    def _generation_review_request(
+        self,
+        generation: int,
+        feedback_source: Sequence[EvaluatedCandidate],
+        parents: Sequence[EvaluatedCandidate],
+    ) -> dict[str, object]:
+        visible: dict[str, EvaluatedCandidate] = {
+            item.candidate.candidate_id: item for item in feedback_source
+        }
+        # Elite parents may survive from an older generation. Include their
+        # already-sanitized development metrics so every selectable source is
+        # inspectable by LLM without exposing the broader archive.
+        visible.update({item.candidate.candidate_id: item for item in parents})
+        records = sorted(
+            (self._sanitized_candidate_feedback(item) for item in visible.values()),
+            key=lambda item: str(item["candidate_id"]),
+        )
+        parent_ids = sorted(item.candidate.candidate_id for item in parents)
+        payload: dict[str, object] = {
+            "schema": "codex_generation_request_v1",
+            "generation": generation,
+            "allowed_splits": ["train", "inner_validation"],
+            "sealed_feedback_included": False,
+            "candidate_feedback": records,
+            "selected_parent_ids": parent_ids,
+            "required_categories": [
+                category
+                for category, count in self._allocation(generation).items()
+                if count > 0
+            ],
+            "allowed_fixes": {
+                "deterministic_mutation": [
+                    "shorten_lookback",
+                    "conservative_repair",
+                    "persistence_smoothing",
+                    "style_robustification",
+                    "stability_smoothing",
+                    "novelty_recombination",
+                    "nonlinear_refinement",
+                    "parameter_refinement",
+                ],
+                "semantic_mutation": [
+                    "shorten_lookback",
+                    "conservative_repair",
+                    "persistence_smoothing",
+                    "style_robustification",
+                    "stability_smoothing",
+                    "novelty_recombination",
+                    "nonlinear_refinement",
+                    "parameter_refinement",
+                ],
+                "crossover": [
+                    "coverage_guarded_crossover",
+                    "failure_avoidance_crossover",
+                    "turnover_guarded_crossover",
+                    "retention_guarded_crossover",
+                    "stability_guarded_crossover",
+                    "novelty_crossover",
+                    "nonlinear_crossover",
+                    "complementary_crossover",
+                ],
+                "crossover_then_mutation": [
+                    "coverage_guarded_crossover",
+                    "failure_avoidance_crossover",
+                    "turnover_guarded_crossover",
+                    "retention_guarded_crossover",
+                    "stability_guarded_crossover",
+                    "novelty_crossover",
+                    "nonlinear_crossover",
+                    "complementary_crossover",
+                ],
+                "injection": [
+                    "shorten_lookback",
+                    "conservative_repair",
+                    "persistence_smoothing",
+                    "style_robustification",
+                    "stability_smoothing",
+                    "novelty_recombination",
+                    "nonlinear_refinement",
+                    "parameter_refinement",
+                ],
+            },
+        }
+        encoded = json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        payload["request_sha256"] = hashlib.sha256(encoded).hexdigest()
+        return payload
+
+    def _activate_generation_review(
+        self,
+        generation: int,
+        feedback_source: Sequence[EvaluatedCandidate],
+        parents: Sequence[EvaluatedCandidate],
+    ) -> Mapping[str, object]:
+        self._active_codex_directives = {}
+        self._active_codex_response_hash = None
+        if self.generation_reviewer is None:
+            return {
+                "enabled": False,
+                "sealed_feedback_consumed": False,
+            }
+        request = self._generation_review_request(
+            generation, feedback_source, parents
+        )
+        response = dict(self.generation_reviewer(generation, request))
+        if response.get("schema") != "codex_generation_response_v1":
+            raise ValueError("LLM generation response schema mismatch")
+        if response.get("generation") != generation:
+            raise ValueError("LLM generation response targets the wrong generation")
+        if response.get("request_sha256") != request["request_sha256"]:
+            raise ValueError("LLM generation response request hash mismatch")
+        if response.get("sealed_feedback_consumed") is not False:
+            raise ValueError("LLM generation response must deny sealed feedback use")
+        reviewer_model = response.get("reviewer_model")
+        if not isinstance(reviewer_model, str) or not reviewer_model.strip():
+            raise ValueError("LLM generation response must identify reviewer_model")
+        decisions = response.get("decisions")
+        if not isinstance(decisions, list) or not decisions:
+            raise ValueError("LLM generation response decisions are missing")
+        allowed_categories = set(request["required_categories"])
+        parent_ids = set(request["selected_parent_ids"])
+        request_feedback = request["candidate_feedback"]
+        assert isinstance(request_feedback, list)
+        known_roles = {
+            str(role)
+            for item in request_feedback
+            if isinstance(item, Mapping)
+            for role in item.get("roles", [])
+        }
+        by_category: dict[str, list[FeedbackDirective]] = {
+            category: [] for category in allowed_categories
+        }
+        clean_decisions: list[dict[str, object]] = []
+        allowed_fixes = request["allowed_fixes"]
+        assert isinstance(allowed_fixes, Mapping)
+        for position, raw in enumerate(decisions):
+            if not isinstance(raw, Mapping):
+                raise ValueError("LLM generation decision must be an object")
+            category = str(raw.get("category", ""))
+            if category not in allowed_categories:
+                raise ValueError(f"LLM decision category is not required: {category}")
+            source = raw.get("source_candidate_id")
+            if source is not None and source not in parent_ids:
+                raise ValueError("LLM decision source must be a selected parent")
+            target_roles_raw = raw.get("target_roles")
+            if (
+                not isinstance(target_roles_raw, list)
+                or not target_roles_raw
+                or any(
+                    not isinstance(role, str) or role not in known_roles
+                    for role in target_roles_raw
+                )
+            ):
+                raise ValueError("LLM decision target_roles are invalid")
+            fix = str(raw.get("fix", ""))
+            category_fixes = allowed_fixes.get(category)
+            if not isinstance(category_fixes, list) or fix not in category_fixes:
+                raise ValueError(f"LLM decision fix is invalid for {category}")
+            cause = str(raw.get("cause", "")).strip()
+            rationale = str(raw.get("rationale", "")).strip()
+            if not cause or not rationale:
+                raise ValueError("LLM decision needs cause and rationale")
+            directive = FeedbackDirective(
+                source_candidate_id=(None if source is None else str(source)),
+                target_roles=tuple(sorted(set(target_roles_raw))),
+                observation=f"codex_generation_{generation}_decision_{position}",
+                cause=cause,
+                fix=fix,
+                evidence={
+                    "request_sha256": request["request_sha256"],
+                    "rationale": rationale,
+                },
+            )
+            by_category[category].append(directive)
+            clean_decisions.append(
+                {
+                    "category": category,
+                    "source_candidate_id": source,
+                    "target_roles": list(directive.target_roles),
+                    "cause": cause,
+                    "fix": fix,
+                    "rationale": rationale,
+                }
+            )
+        missing = sorted(
+            category for category, items in by_category.items() if not items
+        )
+        if missing:
+            raise ValueError(
+                "LLM generation response omitted required categories: "
+                + ", ".join(missing)
+            )
+        response_payload = {
+            "schema": response["schema"],
+            "generation": generation,
+            "request_sha256": request["request_sha256"],
+            "reviewer_model": reviewer_model,
+            "decisions": clean_decisions,
+            "sealed_feedback_consumed": False,
+        }
+        response_hash = hashlib.sha256(
+            json.dumps(
+                response_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        self._active_codex_directives = {
+            category: tuple(items) for category, items in by_category.items()
+        }
+        self._active_codex_response_hash = response_hash
+        return {
+            "enabled": True,
+            "generation": generation,
+            "request_sha256": request["request_sha256"],
+            "response_sha256": response_hash,
+            "reviewer_model": reviewer_model,
+            "decisions": len(clean_decisions),
+            "decisions_by_category": {
+                category: len(items)
+                for category, items in sorted(by_category.items())
+            },
+            "sealed_feedback_consumed": False,
+        }
 
     @staticmethod
     def _feedback_generation_audit(
@@ -2262,10 +2674,14 @@ class EvolutionEngine:
             self.feedback_memory.register_roles(initial_candidates)
             self.feedback_memory.observe(archive)
 
+        feedback_source = list(archive)
         for generation in range(1, self.budget.generations + 1):
             parents = self._select_parents(current)
             if len(parents) < 2:
                 raise RuntimeError("not enough eligible parents for crossover")
+            codex_review = self._activate_generation_review(
+                generation, feedback_source, parents
+            )
             requested = self._children(parents, generation)
             evaluated = self._evaluate_unique(requested, seen)
             # Preserve the declared operator allocation after structural
@@ -2320,6 +2736,8 @@ class EvolutionEngine:
                     "remembered_failures"
                 ]
             summaries.append(generation_summary)
+            generation_summary["codex_generation_review"] = codex_review
+            feedback_source = list(evaluated)
 
         if self._reserved_injection_hashes:
             evaluated_precommitted = {
@@ -2379,6 +2797,9 @@ class EvolutionEngine:
         # sort keeps archive order for tied fitness.  Plus adds an explicit id
         # tie-break before its separate behavior gate for deterministic replay.
         ranked_eligible = (
+            list(self.multiobjective_ranker(eligible_champions))
+            if self.mode == "plus" and self.multiobjective_ranker is not None
+            else
             sorted(
                 eligible_champions,
                 key=lambda item: (-item.score.fitness, item.candidate.candidate_id),

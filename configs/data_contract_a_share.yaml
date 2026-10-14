@@ -1,0 +1,51 @@
+schema_version: "1.0"
+contract_id: a_share_daily_point_in_time
+description: >-
+  Minimum panel contract for research that may eventually control capital. A
+  provider adapter must satisfy this file before factor mining begins.
+
+index:
+  levels: [date, symbol]
+  unique: true
+  sorted: true
+  date_type: datetime64
+
+signal_timing:
+  decision_time: t_close_after_market_data_finalized
+  earliest_execution: t_plus_1_session
+  reference_execution_price: vwap
+  execution_price_basis: raw_unadjusted
+  research_feature_price_basis: point_in_time_adjusted
+
+required_fields:
+  prices: [open, high, low, close, vwap]
+  trading: [volume, amount, tradable, limit_up, limit_down]
+  corporate_actions: [adj_factor]
+  eligibility: [is_st, listed_days, universe_member]
+  classification: [industry]
+  risk: [log_mcap, beta]
+  benchmark: [benchmark_weight]
+  capacity: [adv20_dollars]
+
+metadata_assertions:
+  - vendor
+  - extracted_at
+  - calendar
+  - corporate_action_policy
+  - includes_delisted_true
+  - point_in_time_universe_true
+  - execution_price_basis_raw_unadjusted
+
+forbidden_shortcuts:
+  - current_constituents_backfilled_into_history
+  - delisted_stocks_removed_from_history
+  - today_ST_or_industry_state_backfilled
+  - adjusted_prices_used_as_cash_execution_prices
+  - next_day_price_limit_status_used_to_delete_signal_rows
+  - missing_suspensions_imputed_as_zero_return
+
+storage:
+  recommended_format: parquet_partitioned_by_year
+  snapshot_hash: sha256_over_index_and_values
+  immutable_after_manifest: true
+

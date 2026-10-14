@@ -417,6 +417,7 @@ class HS300ResearchConfig:
     profile: str = "plus"
     seed: int = 17
     bootstrap_samples: int = 200
+    evaluation_workers: int = 1
     reveal_historical_replay: bool = False
     expected_members: int = 300
     reveal_registry_dir: Path | str | None = None
@@ -447,6 +448,8 @@ class HS300ResearchConfig:
             raise ValueError("profile must be faithful or plus")
         if self.bootstrap_samples < 20:
             raise ValueError("real-data research requires at least 20 bootstrap samples")
+        if not 1 <= self.evaluation_workers <= 8:
+            raise ValueError("evaluation_workers must be between 1 and 8")
         if self.expected_members < 1:
             raise ValueError("expected_members must be positive")
         if self.reveal_historical_replay:
@@ -1373,7 +1376,7 @@ def load_codex_seed_candidates(
     if covered != allowed:
         missing = sorted(allowed.difference(covered))
         extra = sorted(covered.difference(allowed))
-        raise ValueError(f"Codex seed batch does not cover all 21 roles: missing={missing}, extra={extra}")
+        raise ValueError(f"LLM seed batch does not cover all 21 roles: missing={missing}, extra={extra}")
     return cards_to_candidates(cards)
 
 
@@ -1382,7 +1385,7 @@ def load_codex_injection_candidates(
     *,
     horizon: int = 10,
 ) -> list[Candidate]:
-    """Load 96 Codex-authored repair cards reserved for live injections.
+    """Load 96 LLM-authored repair cards reserved for live injections.
 
     These cards are not part of generation zero.  Every two generations the
     adaptive controller selects eight still-unused cards according to the
@@ -1410,7 +1413,7 @@ def load_codex_injection_candidates(
         missing = sorted(allowed.difference(covered))
         extra = sorted(covered.difference(allowed))
         raise ValueError(
-            "Codex injection library does not cover all 21 roles: "
+            "LLM injection library does not cover all 21 roles: "
             f"missing={missing}, extra={extra}"
         )
     repairs_by_role = {role: set() for role in allowed}
@@ -1423,12 +1426,12 @@ def load_codex_injection_candidates(
         unknown_repairs = declared_repairs.difference(ADAPTIVE_REPAIR_TAGS)
         if unknown_repairs:
             raise ValueError(
-                f"Codex injection card {card.candidate_key!r} declares unknown "
+                f"LLM injection card {card.candidate_key!r} declares unknown "
                 f"repair tags: {sorted(unknown_repairs)}"
             )
         if not declared_repairs:
             raise ValueError(
-                f"Codex injection card {card.candidate_key!r} has no adaptive repair tag"
+                f"LLM injection card {card.candidate_key!r} has no adaptive repair tag"
             )
         repairs_by_role[card.agent_id].update(declared_repairs)
     incomplete_repairs = {
@@ -1438,7 +1441,7 @@ def load_codex_injection_candidates(
     }
     if incomplete_repairs:
         raise ValueError(
-            "each Codex injection role must cover every adaptive repair class: "
+            "each LLM injection role must cover every adaptive repair class: "
             f"{incomplete_repairs}"
         )
     underfilled_roles = {
@@ -1446,7 +1449,7 @@ def load_codex_injection_candidates(
     }
     if underfilled_roles:
         raise ValueError(
-            "each Codex injection role requires at least four distinct "
+            "each LLM injection role requires at least four distinct "
             f"mechanism cards: {underfilled_roles}"
         )
     candidates = cards_to_candidates(cards)
@@ -1461,7 +1464,7 @@ def load_codex_injection_candidates(
     )
     if overlaps:
         raise ValueError(
-            "Codex injection library structurally duplicates generation-zero "
+            "LLM injection library structurally duplicates generation-zero "
             f"Factor Cards: {overlaps[:5]}"
         )
     for candidate in candidates:
@@ -2195,6 +2198,15 @@ def _validate_development_completion_evidence(
         )
 
 
+def _run_manifest_snapshot_identity(
+    run_manifest: RunManifest,
+    name: str,
+) -> object:
+    """Return one persisted identity in ordinary JSON list/dict form."""
+
+    return run_manifest.to_dict()["data_snapshot"].get(name)
+
+
 def _freeze_reveal_manifest(
     *,
     config: HS300ResearchConfig,
@@ -2214,6 +2226,11 @@ def _freeze_reveal_manifest(
 ) -> tuple[Path, str]:
     run_manifest_path = config.output_dir / "manifest.json"
     run_manifest = RunManifest.load(run_manifest_path)
+    # RunManifest deliberately deep-freezes JSON arrays as tuples in memory.
+    # Compare identities in their serialized JSON domain so a persisted
+    # list-valued lineage record remains equal to the same freshly loaded
+    # source identity.  Direct MappingProxy/tuple versus dict/list equality
+    # spuriously rejects a valid completed development run.
     champions = _champions_payload(evolution.champions)
     champion_family_hash = hash_json(champions)
     split_exact = _split_payload(split)
@@ -2272,6 +2289,7 @@ def _freeze_reveal_manifest(
         split=split,
         budget=SearchBudget(),
         bootstrap_samples=config.bootstrap_samples,
+        evaluation_workers=config.evaluation_workers,
         adaptive_feedback_policy=adaptive_feedback_policy,
         behavioral_champion_policy=behavioral_champion_policy,
         development_handoff_policy=development_handoff_policy.to_dict(),
@@ -2288,13 +2306,17 @@ def _freeze_reveal_manifest(
         raise ValueError(
             "development RunManifest does not bind the frozen implementation identity"
         )
-    if run_manifest.data_snapshot.get("source_lineage_identity") != dict(
+    if _run_manifest_snapshot_identity(
+        run_manifest, "source_lineage_identity"
+    ) != dict(
         development_panel.source_lineage_identity
     ):
         raise ValueError(
             "development RunManifest does not bind the frozen source-lineage identity"
         )
-    if run_manifest.data_snapshot.get("source_snapshot_identity") != source_identity:
+    if _run_manifest_snapshot_identity(
+        run_manifest, "source_snapshot_identity"
+    ) != source_identity:
         raise ValueError(
             "development RunManifest does not bind the full frozen source snapshot"
         )
@@ -3158,6 +3180,7 @@ def run_hs300_research(
         seed=config.seed,
         reveal_sealed=False,
         bootstrap_samples=config.bootstrap_samples,
+        evaluation_workers=config.evaluation_workers,
         model_version="codex-desktop-precommitted-176-factor-cards",
         prompt_version="cogalpha-seven-level-21-role-adaptive-repair-v2",
         initial_candidates=candidates,

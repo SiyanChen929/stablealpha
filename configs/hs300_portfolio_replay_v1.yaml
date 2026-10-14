@@ -1,0 +1,46 @@
+schema_version: 1
+kind: hs300_pre_registered_research_portfolio_replay
+status: frozen_before_historical_replay
+alpha:
+  backend: lightgbm
+  use_post_model_industry_style_neutralization: true
+portfolio:
+  initial_nav_cny: 1000000.0
+  rebalance_every_sessions: 10
+  execution_delay_sessions: 1
+  holding_horizon_sessions: 10
+  benchmark: point_in_time_implied_float_mcap_proxy
+  primary_cost_bps_one_way: 20.0
+  cost_sensitivity_bps_one_way: [10.0, 20.0, 40.0]
+  initialization: benchmark_endowment_for_optimizer_with_full_initial_funding_cost
+risk_model:
+  method: diagonal_adjusted_close_variance
+  lookback_sessions: 60
+  minimum_observations: 20
+  variance_floor: 1.0e-8
+constraints:
+  max_weight: 0.08
+  max_active_weight: 0.02
+  max_industry_active: 0.05
+  max_one_way_turnover: 0.25
+  max_annual_tracking_error: 0.08
+  risk_aversion: 4.0
+  turnover_penalty: 0.002
+  target_investment: 1.0
+  participation_rate: 0.05
+  style_active_bounds:
+    beta: 0.10
+    log_mcap: 0.20
+    momentum: 0.20
+    volatility: 0.20
+    liquidity: 0.20
+accounting:
+  return_basis: backward_adjusted_vwap_exact_calendar_endpoint
+  benchmark_costed: false
+  primary_max_drawdown_sampling: rebalance_endpoint
+  cash_execution_authorized: false
+  official_index_enhancement_claim_authorized: false
+limitations:
+  - official historical HS300 constituent weights are unavailable
+  - complete sourced cash corporate-action ledger is unavailable
+  - board-lot, limit, suspension, partial-fill and exact historical fee effects remain execution diagnostics

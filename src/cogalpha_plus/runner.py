@@ -5,8 +5,10 @@ from __future__ import annotations
 from dataclasses import asdict
 import hashlib
 import json
+import multiprocessing as mp
 from pathlib import Path
-from typing import Any, Mapping
+import resource
+from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -18,7 +20,7 @@ from .evolution import (
     BehavioralChampionPolicy,
     Candidate,
     CandidateScore,
-    CodexSeedInjectionFactory,
+    LLMSeedInjectionFactory,
     EvaluatedCandidate,
     EvolutionEngine,
     EvolutionResult,
@@ -27,16 +29,142 @@ from .evolution import (
     TemplateCandidateFactory,
 )
 from .manifest import RunManifest, hash_json
+from .multiobjective import ParetoSelectionPolicy, pareto_rank
 from .registry import FactorLineage, FactorRecord, FactorRegistry, TrialLedger
 from .metrics import normalize_trading_calendar
 from .terminal_labels import TerminalLabelBridge
 from .validation import (
     DevelopmentEvaluator,
+    ParallelPreparedResult,
     SealedGate,
     SplitPlan,
     build_research_universe_identity,
     research_rule_identity_v1,
 )
+
+
+_PARALLEL_WORKER_EVALUATOR: DevelopmentEvaluator | None = None
+
+
+def _initialize_parallel_worker_sandbox(
+    cpu_seconds: int = 7_200,
+) -> None:
+    """Apply defense-in-depth limits before a worker accepts factor work."""
+
+    soft_cpu, hard_cpu = resource.getrlimit(resource.RLIMIT_CPU)
+    target_cpu = cpu_seconds if hard_cpu < 0 else min(cpu_seconds, hard_cpu)
+    resource.setrlimit(resource.RLIMIT_CPU, (target_cpu, hard_cpu))
+    # Generated source is AST-lowered and never receives Python execution,
+    # imports, file handles, sockets, or builtins.  Do not monkeypatch the
+    # process-wide socket module here: multiprocessing uses local sockets for
+    # its own IPC and would continually respawn disconnected workers.
+    # RLIMIT_DATA is deliberately not used on macOS: scientific libraries map
+    # large shared regions before evaluation, and an 8 GiB data limit caused
+    # workers to exit and respawn even for tiny panels.  Memory is instead
+    # bounded structurally by the fixed in-memory panel, three-worker pool,
+    # source/AST limits, and bounded evaluator caches.
+
+
+def _evaluate_candidate_worker(candidate: Candidate) -> ParallelPreparedResult:
+    """Evaluate order-independent candidate work inside one forked worker."""
+
+    evaluator = _PARALLEL_WORKER_EVALUATOR
+    if evaluator is None:
+        raise RuntimeError("parallel development evaluator was not initialized")
+    # Worker-local rolling state must never determine a score.  Keep reusable
+    # expression/control caches, but reset every order-sensitive container.
+    evaluator.scores.clear()
+    evaluator.artifacts.clear()
+    evaluator._novelty_values.clear()
+    evaluator._novelty_complete_ranks.clear()
+    evaluator._pair_rank_cache.clear()
+    evaluator._pair_correlation_cache.clear()
+    score = evaluator(candidate)
+    if not score.passed:
+        return ParallelPreparedResult(
+            score=score,
+            artifact=None,
+            validation_signed_values=None,
+            validation_neutral_rank_values=None,
+        )
+    artifact = evaluator.artifacts.get(candidate.candidate_id)
+    pair_rank_values = evaluator._pair_rank_cache.get(candidate.candidate_id)
+    if (
+        artifact is None
+        or len(evaluator._novelty_values) != 1
+        or pair_rank_values is None
+    ):
+        raise RuntimeError("worker failed to retain one passed-candidate result")
+    valid_signed = evaluator._novelty_values[0].reindex(
+        evaluator._validation_index
+    )
+    return ParallelPreparedResult(
+        score=score,
+        artifact=artifact,
+        validation_signed_values=valid_signed.to_numpy(
+            dtype=float,
+            na_value=np.nan,
+            copy=True,
+        ),
+        validation_neutral_rank_values=np.asarray(
+            pair_rank_values,
+            dtype=np.float32,
+        ).copy(),
+    )
+
+
+class DeterministicParallelDevelopmentBatch:
+    """Parallel heavy evaluation with serial, ordered parent-state commits."""
+
+    def __init__(self, evaluator: DevelopmentEvaluator, workers: int) -> None:
+        if workers < 2:
+            raise ValueError("parallel batch evaluation requires at least two workers")
+        if "fork" not in mp.get_all_start_methods():
+            raise RuntimeError(
+                "deterministic shared-panel evaluation requires multiprocessing fork"
+            )
+        global _PARALLEL_WORKER_EVALUATOR
+        _PARALLEL_WORKER_EVALUATOR = evaluator
+        self.evaluator = evaluator
+        self.workers = int(workers)
+        self._pool = mp.get_context("fork").Pool(
+            processes=self.workers,
+            initializer=_initialize_parallel_worker_sandbox,
+        )
+        self._closed = False
+
+    def __call__(self, candidates: Sequence[Candidate]) -> tuple[CandidateScore, ...]:
+        if self._closed:
+            raise RuntimeError("parallel batch evaluator is closed")
+        if not candidates:
+            return ()
+        prepared = self._pool.imap(
+            _evaluate_candidate_worker,
+            candidates,
+            chunksize=1,
+        )
+        # imap preserves input order while allowing workers to calculate later
+        # candidates during the parent's ordered commit of earlier candidates.
+        # All order-sensitive calculations and state mutations still happen
+        # here, one candidate at a time.
+        return tuple(
+            self.evaluator.commit_parallel_result(candidate, result)
+            for candidate, result in zip(candidates, prepared, strict=True)
+        )
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._pool.close()
+        self._pool.join()
+        self._closed = True
+
+    def terminate(self) -> None:
+        if self._closed:
+            return
+        self._pool.terminate()
+        self._pool.join()
+        self._closed = True
 
 
 def panel_snapshot_hash(panel: pd.DataFrame) -> str:
@@ -68,6 +196,7 @@ def experiment_config_payload(
     split: SplitPlan,
     budget: SearchBudget,
     bootstrap_samples: int,
+    evaluation_workers: int = 1,
     adaptive_feedback_policy: AdaptiveFeedbackPolicy | None = None,
     behavioral_champion_policy: BehavioralChampionPolicy | None = None,
     development_handoff_policy: Mapping[str, object] | None = None,
@@ -79,6 +208,9 @@ def experiment_config_payload(
     source_lineage_identity: Mapping[str, object] | None = None,
     source_snapshot_identity: Mapping[str, object] | None = None,
     terminal_label_bridge_identity: Mapping[str, object] | None = None,
+    forecast_price_field: str = "vwap",
+    pareto_selection_policy: ParetoSelectionPolicy | None = None,
+    generation_reviewer_identity: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Return the complete resolved configuration bound into a RunManifest."""
 
@@ -92,6 +224,12 @@ def experiment_config_payload(
         raise ValueError(
             "faithful profile cannot receive the Plus behavioral champion policy"
         )
+    if evaluation_workers < 1:
+        raise ValueError("evaluation_workers must be positive")
+    if forecast_price_field not in {"open", "vwap"}:
+        raise ValueError("forecast_price_field must be open or vwap")
+    if profile == "faithful" and pareto_selection_policy is not None:
+        raise ValueError("faithful profile cannot receive Pareto selection")
     resolved_feedback_policy = (
         adaptive_feedback_policy or AdaptiveFeedbackPolicy()
         if profile == "plus"
@@ -108,6 +246,22 @@ def experiment_config_payload(
         "split": split.to_dict(),
         "budget": asdict(budget),
         "bootstrap_samples": bootstrap_samples,
+        "forecast_price_field": forecast_price_field,
+        "pareto_selection_policy": (
+            asdict(pareto_selection_policy)
+            if pareto_selection_policy is not None
+            else None
+        ),
+        "generation_reviewer_identity": (
+            dict(generation_reviewer_identity)
+            if generation_reviewer_identity is not None
+            else None
+        ),
+        "execution": {
+            "evaluation_workers": int(evaluation_workers),
+            "parallel_heavy_compute": evaluation_workers > 1,
+            "ordered_parent_commit": True,
+        },
         # Bind the values consumed by AdaptiveFeedbackMemory, rather than only
         # hashing the path of a declarative YAML file.
         "adaptive_feedback_policy": (
@@ -340,6 +494,7 @@ def run_experiment(
     seed: int = 17,
     reveal_sealed: bool = False,
     bootstrap_samples: int = 100,
+    evaluation_workers: int = 1,
     model_version: str = "codex-desktop-interactive",
     prompt_version: str = "cogalpha-seven-level-v1",
     initial_candidates: list[Candidate] | None = None,
@@ -352,6 +507,13 @@ def run_experiment(
     implementation_identity: Mapping[str, object] | None = None,
     terminal_label_bridges: tuple[TerminalLabelBridge, ...] = (),
     terminal_label_bridge_identity: Mapping[str, object] | None = None,
+    forecast_price_field: str = "vwap",
+    pareto_selection_policy: ParetoSelectionPolicy | None = None,
+    generation_reviewer: Callable[
+        [int, Mapping[str, object]], Mapping[str, object]
+    ]
+    | None = None,
+    generation_reviewer_identity: Mapping[str, object] | None = None,
 ) -> tuple[EvolutionResult, dict[str, object]]:
     if profile not in {"faithful", "plus"}:
         raise ValueError("profile must be faithful or plus")
@@ -362,6 +524,16 @@ def run_experiment(
     if profile == "faithful" and behavioral_champion_policy is not None:
         raise ValueError(
             "faithful profile cannot receive the Plus behavioral champion policy"
+        )
+    if evaluation_workers < 1:
+        raise ValueError("evaluation_workers must be positive")
+    if forecast_price_field not in {"open", "vwap"}:
+        raise ValueError("forecast_price_field must be open or vwap")
+    if profile == "faithful" and pareto_selection_policy is not None:
+        raise ValueError("faithful profile cannot receive Pareto selection")
+    if (generation_reviewer is None) != (generation_reviewer_identity is None):
+        raise ValueError(
+            "generation reviewer and its frozen identity must be supplied together"
         )
     resolved_feedback_policy = (
         adaptive_feedback_policy or AdaptiveFeedbackPolicy()
@@ -526,6 +698,7 @@ def run_experiment(
         split=split,
         budget=budget,
         bootstrap_samples=bootstrap_samples,
+        evaluation_workers=evaluation_workers,
         adaptive_feedback_policy=resolved_feedback_policy,
         behavioral_champion_policy=resolved_behavioral_policy,
         development_handoff_policy=development_handoff_policy,
@@ -537,6 +710,9 @@ def run_experiment(
         source_lineage_identity=lineage_identity,
         source_snapshot_identity=source_identity,
         terminal_label_bridge_identity=terminal_label_bridge_identity,
+        forecast_price_field=forecast_price_field,
+        pareto_selection_policy=pareto_selection_policy,
+        generation_reviewer_identity=generation_reviewer_identity,
     )
     config_hash = hash_json(config)
     manifest = RunManifest.create(
@@ -595,15 +771,21 @@ def run_experiment(
         terminal_label_bridges=terminal_label_bridges,
         terminal_label_bridge_identity=terminal_label_bridge_identity,
         bootstrap_samples=bootstrap_samples,
+        forecast_price_field=forecast_price_field,
     )
     candidate_factory = (
-        CodexSeedInjectionFactory(
+        LLMSeedInjectionFactory(
             initial_candidates,
             injection_cards=injection_candidates,
             seed=seed,
         )
         if initial_candidates is not None
         else TemplateCandidateFactory(seed=seed)
+    )
+    parallel_batch = (
+        DeterministicParallelDevelopmentBatch(evaluator, evaluation_workers)
+        if evaluation_workers > 1
+        else None
     )
     engine = EvolutionEngine(
         evaluator=evaluator,
@@ -613,6 +795,7 @@ def run_experiment(
         mode=profile,
         seed=seed,
         on_evaluated=recorder.record,
+        batch_evaluator=parallel_batch,
         feedback_memory=(
             AdaptiveFeedbackMemory(resolved_feedback_policy)
             if resolved_feedback_policy is not None
@@ -625,8 +808,27 @@ def run_experiment(
         ),
         behavioral_champion_policy=resolved_behavioral_policy,
         on_terminal_audit=recorder.record_terminal_audit,
+        multiobjective_ranker=(
+            (lambda items: pareto_rank(items, pareto_selection_policy))
+            if pareto_selection_policy is not None
+            else None
+        ),
+        residual_pair_correlation=(
+            evaluator.residual_factor_correlation
+            if pareto_selection_policy is not None
+            else None
+        ),
+        generation_reviewer=generation_reviewer,
     )
-    result = engine.run(initial_candidates)
+    try:
+        result = engine.run(initial_candidates)
+    except BaseException:
+        if parallel_batch is not None:
+            parallel_batch.terminate()
+        raise
+    else:
+        if parallel_batch is not None:
+            parallel_batch.close()
     sealed: list[dict[str, object]] | None = None
     if reveal_sealed:
         gate = SealedGate(
@@ -639,6 +841,7 @@ def run_experiment(
             min_names=evaluator.min_names,
             terminal_label_bridges=terminal_label_bridges,
             terminal_label_bridge_identity=terminal_label_bridge_identity,
+            forecast_price_field=forecast_price_field,
         )
         sealed = gate.reveal(result.champions, evaluator.artifacts)
         recorder.ledger.append("sealed_gate_revealed_and_retired", {"results": sealed})

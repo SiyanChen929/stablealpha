@@ -1,0 +1,67 @@
+schema_version: "1.0"
+dataset_id: hs300_baostock_research_proxy_2010_2025
+
+scope:
+  universe: hs300_historical_constituents
+  benchmark_code: sh.000300
+  warmup_start: 2010-01-01
+  research_start: 2011-01-01
+  historical_replay_end: 2025-12-31
+  forecast_horizon_sessions: 10
+  signal_time: t_close_after_market_data_finalized
+  earliest_execution: t_plus_1_session
+
+provider:
+  name: BaoStock
+  package_version: 0.9.3
+  authentication: anonymous_login
+  maximum_requests_per_day: 50000
+  concurrent_connections: 1
+  adjustment:
+    execution_prices: raw_unadjusted
+    research_prices: backward_adjusted
+    raw_adjustflag: "3"
+    feature_adjustflag: "1"
+    forbid_forward_adjustflag: "2"
+
+download:
+  membership_request_frequency: provider_weekly
+  membership_daily_consistency_audit: true
+  kline_partition: symbol_full_range
+  retry_attempts: 5
+  retry_backoff_seconds: 1.0
+  resume: true
+  immutable_successful_objects: true
+
+quality_tier: research_proxy
+known_proxies:
+  benchmark_weight:
+    method: implied_float_cap_from_volume_and_turnover
+    official: false
+  log_mcap:
+    method: log_close_times_implied_float_shares
+    official: false
+  beta:
+    method: rolling_252_session_covariance_to_sh_000300
+    official_barra: false
+  price_limits:
+    method: rule_based_one_price_lock_from_daily_bars
+    order_book_verified: false
+
+hard_watermark: >-
+  This is a BaoStock research-proxy snapshot over the historical CSI300
+  constituent domain. It is not an official CSI300 historical-weight dataset,
+  not a Barra risk model, and not evidence of live executability.
+
+strict_production_blockers:
+  - missing_official_historical_constituent_weights
+  - no_order_book_or_official_daily_limit_price_feed
+  - implied_float_cap_is_a_proxy
+  - rolling_beta_is_not_barra_beta
+
+storage:
+  root: data/baostock_hs300
+  raw_cache: raw
+  normalized: normalized
+  manifests: manifests
+  state: request_state.json

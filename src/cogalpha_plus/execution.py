@@ -148,16 +148,25 @@ class StateWeightSnapshot:
 class ChinaAExecutionSimulator:
     """Execute target weights using canonical raw prices and market frictions."""
 
-    RAW_PRICE_FIELDS = frozenset({"vwap", "close"})
+    RAW_PRICE_FIELDS = frozenset({"open", "vwap", "close"})
     REQUIRED_MARKET_FIELDS = frozenset(
         {"vwap", "close", "volume", "tradable", "limit_up", "limit_down", "is_st", "listed_days"}
     )
 
-    def __init__(self, fee_regimes: Sequence[FeeRegime], rules: ExecutionRules | None = None) -> None:
+    def __init__(
+        self,
+        fee_regimes: Sequence[FeeRegime],
+        rules: ExecutionRules | None = None,
+        *,
+        execution_price_field: str = "vwap",
+    ) -> None:
         if not fee_regimes:
             raise ValueError("at least one explicit historical fee regime is required")
+        if execution_price_field not in {"open", "vwap"}:
+            raise ValueError("execution_price_field must be open or vwap")
         self.fee_regimes = tuple(sorted(fee_regimes, key=lambda item: item.start))
         self.rules = rules or ExecutionRules()
+        self.execution_price_field = execution_price_field
 
     def _fees(self, date: pd.Timestamp) -> FeeRegime:
         matches = [regime for regime in self.fee_regimes if regime.contains(date)]
@@ -165,23 +174,28 @@ class ChinaAExecutionSimulator:
             raise ValueError(f"execution date {pd.Timestamp(date).date()} matches {len(matches)} fee regimes")
         return matches[0]
 
-    @staticmethod
-    def _validate_market(market: pd.DataFrame) -> pd.DataFrame:
-        missing = ChinaAExecutionSimulator.REQUIRED_MARKET_FIELDS.difference(market.columns)
+    def _validate_market(self, market: pd.DataFrame) -> pd.DataFrame:
+        required = self.REQUIRED_MARKET_FIELDS | {self.execution_price_field}
+        missing = required.difference(market.columns)
         if missing:
             raise ValueError(f"market snapshot missing execution fields: {sorted(missing)}")
         if market.index.has_duplicates:
             raise ValueError("market symbol index must be unique")
         # Drop every research-only column at the execution boundary.  In
         # particular, adj_close/adj_vwap can never be selected downstream.
-        output = market.loc[:, sorted(ChinaAExecutionSimulator.REQUIRED_MARKET_FIELDS)].copy()
+        output = market.loc[:, sorted(required)].copy()
         output.index = output.index.astype(str)
-        numeric = ("vwap", "close", "volume", "listed_days")
+        numeric = tuple(
+            dict.fromkeys(
+                ("vwap", "close", self.execution_price_field, "volume", "listed_days")
+            )
+        )
         for name in numeric:
             output[name] = pd.to_numeric(output[name], errors="coerce")
-        if output[["vwap", "close", "volume"]].isna().any().any():
+        price_fields = list(dict.fromkeys(("vwap", "close", self.execution_price_field)))
+        if output[[*price_fields, "volume"]].isna().any().any():
             raise ValueError("market prices/volume contain missing values")
-        if (output[["vwap", "close"]] <= 0).any().any() or (output["volume"] < 0).any():
+        if (output[price_fields] <= 0).any().any() or (output["volume"] < 0).any():
             raise ValueError("market prices must be positive and volume non-negative")
         return output
 
@@ -263,11 +277,12 @@ class ChinaAExecutionSimulator:
         missing = set(universe).difference(snapshot.index)
         if missing:
             raise ValueError(f"target/held symbols missing from market snapshot: {sorted(missing)}")
-        nav_before = self.mark_to_market(state, snapshot, price_field="vwap")
+        execution_field = self.execution_price_field
+        nav_before = self.mark_to_market(state, snapshot, price_field=execution_field)
         desired: dict[str, int] = {}
         for symbol in universe:
             weight = float(targets.get(symbol, 0.0))
-            raw = nav_before * weight / float(snapshot.loc[symbol, "vwap"])
+            raw = nav_before * weight / float(snapshot.loc[symbol, execution_field])
             desired[symbol] = int(max(0, math.floor(raw / self.rules.lot_size) * self.rules.lot_size))
 
         fills: list[Fill] = []
@@ -321,7 +336,7 @@ class ChinaAExecutionSimulator:
                 fills.append(Fill(str(day.date()), symbol, "sell", request, 0, None, 0.0, 0.0, "blocked", reason, 0.0))
                 continue
             participation = quantity / max(float(snapshot.loc[symbol, "volume"]), 1.0)
-            price = self._execution_price(float(snapshot.loc[symbol, "vwap"]), "sell", participation)
+            price = self._execution_price(float(snapshot.loc[symbol, execution_field]), "sell", participation)
             notional = quantity * price
             fees = self._transaction_fees(regime, "sell", notional)
             state.cash += notional - fees
@@ -359,7 +374,7 @@ class ChinaAExecutionSimulator:
             # Impact depends on final quantity. If cash is short, recompute after
             # reducing to affordable lots; never allow negative cash.
             participation = quantity / max(float(snapshot.loc[symbol, "volume"]), 1.0)
-            price = self._execution_price(float(snapshot.loc[symbol, "vwap"]), "buy", participation)
+            price = self._execution_price(float(snapshot.loc[symbol, execution_field]), "buy", participation)
             affordable = int(
                 math.floor(max(state.cash - regime.minimum_commission, 0.0) / price / self.rules.lot_size)
                 * self.rules.lot_size
@@ -367,7 +382,7 @@ class ChinaAExecutionSimulator:
             quantity = min(quantity, affordable)
             while quantity > 0:
                 participation = quantity / max(float(snapshot.loc[symbol, "volume"]), 1.0)
-                price = self._execution_price(float(snapshot.loc[symbol, "vwap"]), "buy", participation)
+                price = self._execution_price(float(snapshot.loc[symbol, execution_field]), "buy", participation)
                 notional = quantity * price
                 fees = self._transaction_fees(regime, "buy", notional)
                 if notional + fees <= state.cash + 1e-9:
@@ -377,7 +392,7 @@ class ChinaAExecutionSimulator:
                 fills.append(Fill(str(day.date()), symbol, "buy", request, 0, None, 0.0, 0.0, "blocked", "insufficient_cash", 0.0))
                 continue
             participation = quantity / max(float(snapshot.loc[symbol, "volume"]), 1.0)
-            price = self._execution_price(float(snapshot.loc[symbol, "vwap"]), "buy", participation)
+            price = self._execution_price(float(snapshot.loc[symbol, execution_field]), "buy", participation)
             notional = quantity * price
             fees = self._transaction_fees(regime, "buy", notional)
             state.cash -= notional + fees
@@ -407,11 +422,11 @@ class ChinaAExecutionSimulator:
         if state.cash < -1e-6:
             raise RuntimeError("execution produced negative cash")
         nav_after = state.cash + state.receivable_cash + sum(
-            state.total_shares(symbol) * float(snapshot.loc[symbol, "vwap"])
+            state.total_shares(symbol) * float(snapshot.loc[symbol, execution_field])
             for symbol in state.share_symbols()
         )
         realized = {
-            symbol: state.total_shares(symbol) * float(snapshot.loc[symbol, "vwap"]) / nav_after
+            symbol: state.total_shares(symbol) * float(snapshot.loc[symbol, execution_field]) / nav_after
             for symbol in state.share_symbols()
         }
         return ExecutionReport(

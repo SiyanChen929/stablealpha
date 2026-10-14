@@ -1,0 +1,143 @@
+schema_version: "1.0"
+profile_id: cogalpha_faithful
+profile_version: "2026-08-29"
+description: >-
+  Reproduction baseline that preserves the published CogAlpha search shape before
+  introducing AlphaForge/CogAlpha-Plus improvements. Values described explicitly
+  by the paper are fixed; implementation details absent from the public release
+  remain named configuration choices rather than undocumented assumptions.
+
+agent_hierarchy:
+  catalog: configs/agents.yaml
+  enabled_levels: [1, 2, 3, 4, 5, 6, 7]
+  enabled_agent_count: 21
+  scheduling: island_style
+  guidance_paraphrase: enabled
+  adaptive_feedback:
+    enabled: true
+    sources: [effective_factors, ineffective_factors]
+    allowed_splits: [train, inner_validation]
+    reproduction_status: published_behavior_declared_but_exact_prompt_runtime_unreleased
+    local_control_arm: fitness_rank_without_plus_feedback_controller
+
+search_budget:
+  initial_population: 80
+  parent_pool: 32
+  offspring_per_generation: 96
+  generations: 24
+  subcycles:
+    count: 3
+    generations_each: 8
+  fresh_injection:
+    interval_generations: 2
+    count: implementation_parameter
+  elite_carryover: 2
+  final_factor_count: 20
+
+evolution:
+  operations:
+    - mutation
+    - crossover
+    - crossover_then_mutation
+  parent_selection: fitness_rank
+  child_quality_gate: multi_agent_quality_checker
+  quality_checker_stages:
+    - code_quality
+    - code_repair_if_needed
+    - runtime_check
+    - logic_judgment
+    - logic_improvement_if_needed
+    - temporal_leakage_check
+  candidate_representation: generated_code
+  lineage_required: true
+
+fitness:
+  metrics: [ic, icir, rank_ic, rank_icir]
+  aggregation: mean_percentile_rank
+  evaluation_splits: [train, inner_validation]
+  factor_direction_source: train_only
+  note: >-
+    Exact sign/absolute-value conventions and all filtering thresholds must be
+    pinned to the selected reproduction target before a run is declared faithful.
+
+ensemble:
+  scope: frozen_development_family_joint_one_time_reveal
+  invoked_by_hs300_factor_discovery_runtime: true
+  status: fixed_family_no_backend_selection
+  handoff:
+    min_names: 20
+    minimum_daily_factor_coverage: 0.80
+    maximum_zero_impute_share: 0.20
+    maximum_absolute_neutral_correlation: 0.999
+    allow_leading_train_warmup: true
+    minimum_retained_train_dates: 40
+    minimum_daily_label_coverage: 1.0
+    allow_label_row_drop: false
+    schema_version: 1
+  composite_family:
+    primary_backend: lightgbm
+    members: [equal_weight, ridge, lightgbm]
+    ridge_alpha: 1.0
+    random_state: 17
+    schema_version: 1
+    lightgbm_configuration:
+      objective: regression
+      n_estimators: 300
+      learning_rate: 0.03
+      num_leaves: 31
+      min_child_samples: 100
+      subsample: 0.8
+      subsample_freq: 1
+      colsample_bytree: 0.8
+      reg_alpha: 0.1
+      reg_lambda: 1.0
+      deterministic: true
+      force_col_wise: true
+      n_jobs: 1
+      verbosity: -1
+      random_state: 17
+  validation_metrics_usage: descriptive_only_never_selection_or_tuning
+  backend_selection_allowed: false
+  pre_registered_contrasts:
+    [lightgbm_minus_equal_weight, ridge_minus_equal_weight, lightgbm_minus_ridge]
+  sealed_reporting: unique_lightgbm_primary_with_joint_23_fwer_and_pre_registered_secondaries
+  reporting_contract:
+    schema_version: 1
+    unique_primary_result_key: composite:lightgbm
+    unique_primary_backend: lightgbm
+    primary_endpoint_key: sealed_neutral
+    primary_inference_key: joint_multiple_testing
+    joint_multiplicity_family: all_20_factors_plus_3_composites
+    joint_multiplicity_family_size: 23
+    joint_family_role: conservative_fwer_control_not_a_selection_or_winner_pool
+    component_factor_role: pre_registered_secondary_component_factor_diagnostic
+    control_composite_result_keys: [composite:equal_weight, composite:ridge]
+    control_composite_role: pre_registered_secondary_model_control
+    contrast_family_role: pre_registered_secondary_model_comparison
+    immediate_executable_role: pre_registered_secondary_execution_sensitivity_diagnostic
+    secondary_results_eligible_for_primary_claim: false
+    backend_selection_from_sealed_results_allowed: false
+    primary_reassignment_allowed: false
+
+reproducibility:
+  persist_every_candidate: true
+  persist_rejected_candidates: true
+  persist_llm_transcripts: true
+  persist_factor_lineage: true
+  persist_random_seeds: true
+  persist_data_manifest: true
+  unresolved_public_details:
+    - exact_model_checkpoint_and_serving_stack
+    - exact_seed_allocation_across_21_agents
+    - exact_fresh_injection_count
+    - complete_runtime_code
+    - complete_dataset_snapshot
+
+claims_policy:
+  label: reproduction_baseline
+  may_claim_exact_replication: false
+  exact_replication_requires:
+    - resolved_public_details
+    - matching_data_snapshot
+    - matching_model_checkpoint
+    - matching_metric_implementation

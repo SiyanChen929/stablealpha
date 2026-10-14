@@ -31,10 +31,6 @@ from .data_sources.adjustment_reconstruction_audit import (
     audit_adjustment_reconstruction,
     configuration_failure_report,
 )
-from .data_sources.sp500_local_readiness import (
-    SP500ReadinessConfig,
-    audit_sp500_local_readiness,
-)
 from .hs300_research import (
     HS300ResearchConfig,
     SEMANTIC_REVIEW_RELATIVE_PATH,
@@ -43,6 +39,7 @@ from .hs300_research import (
     run_hs300_research,
 )
 from .manifest import hash_json
+from .paths import data_home
 from .proposals import build_agent_input_contract, load_factor_cards
 from .runner import run_experiment
 from .semantic_audit import validate_semantic_review_manifest
@@ -180,8 +177,12 @@ def command_demo(args: argparse.Namespace) -> int:
         seed=args.seed,
         reveal_sealed=args.reveal_synthetic_sealed,
         bootstrap_samples=args.bootstrap_samples,
+        evaluation_workers=args.evaluation_workers,
         model_version="template-control-no-llm",
         prompt_version="synthetic-integration-test-v1",
+        # The synthetic fixture has no vendor calendar; its own dates are the
+        # session calendar.  Real-data commands never set this flag.
+        allow_test_calendar_from_panel=True,
     )
     concise = {
         "run_id": summary["run_id"],
@@ -234,7 +235,7 @@ def command_validate_proposals(args: argparse.Namespace) -> int:
 
 def _hs300_source_config(args: argparse.Namespace) -> HS300SourceConfig:
     project = Path(args.project).resolve()
-    root = Path(args.data_root) if args.data_root else project / "data" / "baostock_hs300"
+    root = Path(args.data_root) if args.data_root else data_home(project) / "baostock_hs300"
     if not root.is_absolute():
         root = (project / root).resolve()
     return HS300SourceConfig(
@@ -257,7 +258,7 @@ def _hs300_build_config(args: argparse.Namespace) -> HS300BuildConfig:
     root = _project_relative_path(
         project,
         args.data_root,
-        project / "data" / "baostock_hs300",
+        data_home(project) / "baostock_hs300",
     )
     output = _project_relative_path(project, args.output_dir, root / "panel")
     return HS300BuildConfig(
@@ -372,7 +373,7 @@ def command_data_adjustment_reconstruction_audit(
     root = _project_relative_path(
         project,
         args.data_root,
-        project / "data" / "baostock_hs300",
+        data_home(project) / "baostock_hs300",
     )
     cache_dir = root / "raw"
     normalized_dir = root / "normalized"
@@ -442,7 +443,7 @@ def _hs300_audit_config(args: argparse.Namespace) -> HS300AuditConfig:
     root = _project_relative_path(
         project,
         args.data_root,
-        project / "data" / "baostock_hs300",
+        data_home(project) / "baostock_hs300",
     )
     panel_dir = _project_relative_path(project, args.panel_dir, root / "panel")
     normalized_dir = (
@@ -475,44 +476,12 @@ def command_data_audit(args: argparse.Namespace) -> int:
     return 0 if report.valid else 1
 
 
-def command_data_sp500_readiness(args: argparse.Namespace) -> int:
-    project = Path(args.project).resolve()
-    asset_paths = tuple(
-        path if path.is_absolute() else project / path
-        for path in (Path(value) for value in args.asset)
-    )
-    config = SP500ReadinessConfig(
-            project_dir=project,
-            asset_paths=asset_paths,
-            include_known_assets=not args.no_known_assets,
-            required_start=args.required_start,
-            required_end=args.required_end,
-            maximum_discovered_files=args.maximum_discovered_files,
-            maximum_hash_bytes=args.maximum_hash_bytes,
-            minimum_security_count=args.minimum_security_count,
-    )
-    if config.required_start > "2008-01-01":
-        raise ValueError("CLI S&P 500 readiness required_start cannot be after 2008-01-01")
-    if config.required_end < "2026-08-31":
-        raise ValueError("CLI S&P 500 readiness required_end cannot be before 2026-08-31")
-    if config.minimum_security_count < 500:
-        raise ValueError("CLI S&P 500 readiness minimum_security_count cannot be below 500")
-    report = audit_sp500_local_readiness(config)
-    if args.output:
-        output = Path(args.output)
-        if not output.is_absolute():
-            output = project / output
-        report.save(output)
-    print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
-    return 0 if report.ready else 1
-
-
 def command_research_hs300(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
     data_root = _project_relative_path(
         project,
         args.data_root,
-        project / "data" / "baostock_hs300",
+        data_home(project) / "baostock_hs300",
     )
     panel_dir = _project_relative_path(project, args.panel_dir, data_root / "panel")
     output_dir = _project_relative_path(project, args.output, project / "runs" / "hs300_full_v1")
@@ -529,6 +498,7 @@ def command_research_hs300(args: argparse.Namespace) -> int:
             profile=args.profile,
             seed=args.seed,
             bootstrap_samples=args.bootstrap_samples,
+            evaluation_workers=args.evaluation_workers,
             expected_members=args.expected_members,
         )
     )
@@ -589,7 +559,7 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument("--project", default=str(_project_root()))
     check.set_defaults(func=command_check)
 
-    proposals = sub.add_parser("validate-proposals", help="validate Codex Factor Card JSONL files")
+    proposals = sub.add_parser("validate-proposals", help="validate LLM Factor Card JSONL files")
     proposals.add_argument("files", nargs="+")
     proposals.add_argument("--project", default=str(_project_root()))
     proposals.add_argument("--horizon", type=int, default=10)
@@ -608,6 +578,7 @@ def build_parser() -> argparse.ArgumentParser:
     demo.add_argument("--train-fraction", type=float, default=0.50)
     demo.add_argument("--validation-fraction", type=float, default=0.20)
     demo.add_argument("--bootstrap-samples", type=int, default=50)
+    demo.add_argument("--evaluation-workers", type=int, default=1)
     demo.add_argument(
         "--reveal-synthetic-sealed",
         action="store_true",
@@ -636,6 +607,7 @@ def build_parser() -> argparse.ArgumentParser:
     hs300.add_argument("--profile", choices=("faithful", "plus"), default="plus")
     hs300.add_argument("--seed", type=int, default=17)
     hs300.add_argument("--bootstrap-samples", type=int, default=200)
+    hs300.add_argument("--evaluation-workers", type=int, default=1)
     hs300.add_argument("--expected-members", type=int, default=300)
     hs300.set_defaults(func=command_research_hs300)
 
@@ -837,38 +809,6 @@ def build_parser() -> argparse.ArgumentParser:
     audit.add_argument("--minimum-proxy-mcap-coverage", type=float, default=1.00)
     audit.add_argument("--maximum-samples", type=int, default=10)
     audit.set_defaults(func=command_data_audit)
-
-    sp500_readiness = data_sub.add_parser(
-        "sp500-readiness",
-        help=(
-            "offline fail-closed audit for a point-in-time S&P 500 source panel; "
-            "current-constituent files are secondary validation only"
-        ),
-    )
-    sp500_readiness.add_argument("--project", default=str(_project_root()))
-    sp500_readiness.add_argument(
-        "--asset",
-        action="append",
-        default=[],
-        help="local file or bounded directory to inspect; may be repeated",
-    )
-    sp500_readiness.add_argument(
-        "--no-known-assets",
-        action="store_true",
-        help="do not inspect the pre-registered nearby local research assets",
-    )
-    sp500_readiness.add_argument("--required-start", default="2008-01-01")
-    sp500_readiness.add_argument("--required-end", default="2026-08-31")
-    sp500_readiness.add_argument("--maximum-discovered-files", type=int, default=256)
-    sp500_readiness.add_argument(
-        "--maximum-hash-bytes", type=int, default=1_073_741_824
-    )
-    sp500_readiness.add_argument("--minimum-security-count", type=int, default=500)
-    sp500_readiness.add_argument(
-        "--output",
-        help="write the JSON manifest with exclusive-create semantics",
-    )
-    sp500_readiness.set_defaults(func=command_data_sp500_readiness)
     return parser
 
 

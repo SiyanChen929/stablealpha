@@ -17,7 +17,8 @@ each symbol, use current/past values only, and finally restore the input order.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections import OrderedDict
+from collections.abc import Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, fields as dataclass_fields
 from fractions import Fraction
 import hashlib
@@ -109,10 +110,24 @@ _BINARY = frozenset({"add", "sub", "mul", "div"})
 _UNARY = frozenset({"abs", "log1p", "sqrt", "neg"})
 _PERIODIC = frozenset({"lag", "delta", "return"})
 _ROLLING_UNARY = frozenset(
-    {"ts_mean", "ts_std", "ts_min", "ts_max", "ts_sum"}
+    {
+        "ts_mean",
+        "ts_std",
+        "ts_min",
+        "ts_max",
+        "ts_sum",
+        # Audited research extensions.  Every operator is trailing-only and
+        # has a fixed, documented estimator; no generated code supplies a
+        # callback or executable object.
+        "ts_sign_entropy",
+        "ts_cusum",
+        "ts_spectral_ratio",
+        "ts_state_transition",
+    }
 )
 _ROLLING_BINARY = frozenset({"ts_corr"})
 _CROSS_SECTIONAL = frozenset({"cs_rank", "cs_zscore"})
+_CROSS_SECTIONAL_BINARY = frozenset({"cs_residual"})
 _TIME_SERIES = _PERIODIC | _ROLLING_UNARY | _ROLLING_BINARY
 _ALL_OPERATORS = frozenset(
     {"field", "const"}
@@ -122,6 +137,7 @@ _ALL_OPERATORS = frozenset(
     | _ROLLING_UNARY
     | _ROLLING_BINARY
     | _CROSS_SECTIONAL
+    | _CROSS_SECTIONAL_BINARY
 )
 _COMMUTATIVE = frozenset({"add", "mul"})
 _LABEL_LIKE_RE = re.compile(
@@ -208,7 +224,7 @@ def _production_semantics(
         )
         for position, child in enumerate(node["args"])
     ]
-    contains_cross_sectional = op in _CROSS_SECTIONAL or any(
+    contains_cross_sectional = op in (_CROSS_SECTIONAL | _CROSS_SECTIONAL_BINARY) or any(
         child.contains_cross_sectional for child in children
     )
     if (
@@ -229,10 +245,19 @@ def _production_semantics(
     def unknown(reason: str) -> _SemanticSignature:
         return _SemanticSignature(None, contains_cross_sectional, reason)
 
-    if op in {"abs", "neg", "lag", "delta"} | _ROLLING_UNARY:
+    if op in {"abs", "neg", "lag", "delta", "ts_mean", "ts_std", "ts_min", "ts_max", "ts_sum"}:
         if degrees[0] is None:
             return unknown(inherited_failure or f"{path}: child is not homogeneous")
         return _SemanticSignature(degrees[0], contains_cross_sectional)
+    if op in {
+        "ts_sign_entropy",
+        "ts_cusum",
+        "ts_spectral_ratio",
+        "ts_state_transition",
+    }:
+        if degrees[0] is None:
+            return unknown(inherited_failure or f"{path}: child is not homogeneous")
+        return _SemanticSignature(Fraction(0), contains_cross_sectional)
     if op == "sqrt":
         if degrees[0] is None:
             return unknown(inherited_failure or f"{path}: child is not homogeneous")
@@ -274,6 +299,13 @@ def _production_semantics(
             return unknown(
                 inherited_failure
                 or f"{path}: {op} requires a price-scale invariant child"
+            )
+        return _SemanticSignature(Fraction(0), contains_cross_sectional)
+    if op == "cs_residual":
+        if degrees[0] != 0 or degrees[1] != 0:
+            return unknown(
+                inherited_failure
+                or f"{path}: cs_residual requires two price-scale invariant children"
             )
         return _SemanticSignature(Fraction(0), contains_cross_sectional)
     raise RuntimeError(f"unhandled validated operator {op!r}")
@@ -362,7 +394,11 @@ def _inspect(
             return 0
 
         required_keys = {"op", "args"}
-        arity = 2 if op in _BINARY or op in _ROLLING_BINARY else 1
+        arity = (
+            2
+            if op in _BINARY or op in _ROLLING_BINARY or op in _CROSS_SECTIONAL_BINARY
+            else 1
+        )
         parameter_name: str | None = None
         if op in _PERIODIC:
             parameter_name = "periods"
@@ -402,6 +438,20 @@ def _inspect(
             if parameter > spec.max_window:
                 state.issues.append(
                     f"{path}.{parameter_name}: exceeds max_window={spec.max_window}"
+                )
+                return 0
+            if op in {
+                "ts_sign_entropy",
+                "ts_cusum",
+                "ts_state_transition",
+            } and parameter < 2:
+                state.issues.append(
+                    f"{path}.{parameter_name}: {op} requires a window >= 2"
+                )
+                return 0
+            if op == "ts_spectral_ratio" and parameter < 4:
+                state.issues.append(
+                    f"{path}.{parameter_name}: ts_spectral_ratio requires a window >= 4"
                 )
                 return 0
 
@@ -668,6 +718,77 @@ def _time_pair_transform(
     return pd.Series(output, index=left.index, dtype=float)
 
 
+def _normalized_binary_entropy(values: pd.Series, window: int) -> pd.Series:
+    """Trailing entropy of the non-negative/negative state, normalized to [0, 1]."""
+
+    finite = values.notna()
+    positive = values.ge(0.0).astype(float).where(finite)
+    count = finite.rolling(window, min_periods=window).sum()
+    probability = positive.rolling(window, min_periods=window).mean()
+    clipped = probability.clip(0.0, 1.0)
+    left = clipped.where(clipped > 0.0)
+    right = (1.0 - clipped).where(clipped < 1.0)
+    entropy = -(
+        left.mul(np.log(left)).fillna(0.0)
+        + right.mul(np.log(right)).fillna(0.0)
+    ) / math.log(2.0)
+    return entropy.where(count.eq(window))
+
+
+def _normalized_cusum(values: pd.Series, window: int) -> pd.Series:
+    """Trailing maximum centered cumulative excursion, scaled by path volatility."""
+
+    def statistic(sample: np.ndarray) -> float:
+        if not np.isfinite(sample).all():
+            return np.nan
+        scale = float(np.std(sample, ddof=0))
+        if scale <= 0.0:
+            return np.nan
+        centered_path = np.cumsum(sample - float(np.mean(sample)))
+        return float(np.max(np.abs(centered_path)) / (scale * math.sqrt(window)))
+
+    return values.rolling(window, min_periods=window).apply(statistic, raw=True)
+
+
+def _spectral_low_frequency_ratio(values: pd.Series, window: int) -> pd.Series:
+    """Power in the first non-zero Fourier frequency divided by total path power."""
+
+    source = values.to_numpy(dtype=float)
+    valid = np.isfinite(source)
+    safe = np.where(valid, source, 0.0)
+    angle = 2.0 * np.pi * np.arange(window, dtype=float) / float(window)
+    cosine = np.cos(angle)
+    sine = np.sin(angle)
+    # np.convolve reverses the second operand. Reversing the kernels preserves
+    # the documented oldest-to-newest Fourier orientation; squared power is
+    # phase-invariant, but keeping the convention explicit aids reconstruction.
+    dot_cos = np.convolve(safe, cosine[::-1], mode="valid")
+    dot_sin = np.convolve(safe, sine[::-1], mode="valid")
+    rolling_sum = np.convolve(safe, np.ones(window), mode="valid")
+    rolling_square = np.convolve(safe * safe, np.ones(window), mode="valid")
+    rolling_count = np.convolve(valid.astype(float), np.ones(window), mode="valid")
+    total_power = rolling_square - rolling_sum * rolling_sum / float(window)
+    fundamental_power = 2.0 * (dot_cos * dot_cos + dot_sin * dot_sin) / float(window)
+    ratio = np.divide(
+        fundamental_power,
+        total_power,
+        out=np.full_like(total_power, np.nan),
+        where=(rolling_count == window) & (total_power > 0.0),
+    )
+    output = np.full(len(source), np.nan, dtype=float)
+    output[window - 1 :] = np.clip(ratio, 0.0, 1.0)
+    return pd.Series(output, index=values.index, dtype=float)
+
+
+def _state_transition_rate(values: pd.Series, window: int) -> pd.Series:
+    """Share of adjacent sign states that switch inside a trailing window."""
+
+    states = np.sign(values)
+    transitions = states.ne(states.shift(1)).astype(float)
+    transitions = transitions.where(values.notna() & values.shift(1).notna())
+    return transitions.rolling(window - 1, min_periods=window - 1).mean()
+
+
 def _ordered_symbol_positions(
     index: pd.MultiIndex,
     date_level: int | str,
@@ -692,6 +813,8 @@ def evaluate_expression(
     *,
     epsilon: float = 1e-12,
     cross_sectional_mask: pd.Series | None = None,
+    external_memo: MutableMapping[str, pd.Series] | None = None,
+    external_memo_limit: int = 0,
 ) -> pd.Series:
     """Evaluate a validated factor on a ``(date, symbol)`` panel.
 
@@ -722,7 +845,11 @@ def evaluate_expression(
             cross_sectional_mask,
             label="cross_sectional_mask",
         )
-    memo: dict[str, pd.Series] = {}
+    if external_memo_limit < 0:
+        raise ValueError("external_memo_limit must be non-negative")
+    memo: MutableMapping[str, pd.Series] = (
+        {} if external_memo is None else external_memo
+    )
     ordered_time_groups: tuple[np.ndarray, ...] | None = None
 
     def time_groups() -> tuple[np.ndarray, ...]:
@@ -737,6 +864,8 @@ def evaluate_expression(
         key = _canonical_json_valid(node)
         cached = memo.get(key)
         if cached is not None:
+            if isinstance(memo, OrderedDict):
+                memo.move_to_end(key)
             return cached
         op = node["op"]
         if op == "field":
@@ -821,10 +950,22 @@ def evaluate_expression(
                     reducer = lambda values: values.rolling(
                         window, min_periods=window
                     ).max()
-                else:
+                elif op == "ts_sum":
                     reducer = lambda values: values.rolling(
                         window, min_periods=window
                     ).sum()
+                elif op == "ts_sign_entropy":
+                    reducer = lambda values: _normalized_binary_entropy(
+                        values, window
+                    )
+                elif op == "ts_cusum":
+                    reducer = lambda values: _normalized_cusum(values, window)
+                elif op == "ts_spectral_ratio":
+                    reducer = lambda values: _spectral_low_frequency_ratio(
+                        values, window
+                    )
+                else:
+                    reducer = lambda values: _state_transition_rate(values, window)
                 result = _time_transform(
                     args[0],
                     date_level,
@@ -855,10 +996,44 @@ def evaluate_expression(
                 mean = grouped.transform("mean")
                 std = grouped.transform(lambda values: values.std(ddof=0))
                 result = (cross_section - mean) / std.where(std > epsilon)
+            elif op == "cs_residual":
+                dependent = args[0].where(eligible)
+                exposure = args[1].where(eligible)
+                paired = pd.DataFrame(
+                    {"dependent": dependent, "exposure": exposure}
+                )
+                valid_pair = paired.notna().all(axis=1)
+                y = dependent.where(valid_pair)
+                x = exposure.where(valid_pair)
+                grouped_y = y.groupby(level=date_level, sort=False)
+                grouped_x = x.groupby(level=date_level, sort=False)
+                mean_y = grouped_y.transform("mean")
+                mean_x = grouped_x.transform("mean")
+                centered_y = y - mean_y
+                centered_x = x - mean_x
+                covariance = (centered_y * centered_x).groupby(
+                    level=date_level, sort=False
+                ).transform("sum")
+                variance = (centered_x * centered_x).groupby(
+                    level=date_level, sort=False
+                ).transform("sum")
+                count = valid_pair.groupby(level=date_level, sort=False).transform(
+                    "sum"
+                )
+                slope = covariance / variance.where(variance > epsilon)
+                result = (centered_y - slope * centered_x).where(count >= 3)
             else:  # pragma: no cover - validation makes this unreachable.
                 raise RuntimeError(f"unhandled validated operator {op!r}")
         result = _finite(result).reindex(panel.index)
         memo[key] = result
+        if isinstance(memo, OrderedDict):
+            memo.move_to_end(key)
+        if external_memo_limit:
+            while len(memo) > external_memo_limit:
+                if isinstance(memo, OrderedDict):
+                    memo.popitem(last=False)
+                else:
+                    memo.pop(next(iter(memo)))
         return result
 
     output = evaluate(normalized).copy()

@@ -1,4 +1,4 @@
-"""Strict interchange format between Codex research agents and Python gates."""
+"""Strict interchange format between LLM research agents and Python gates."""
 
 from __future__ import annotations
 

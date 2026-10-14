@@ -1,0 +1,192 @@
+schema_version: "1.0"
+profile_id: cogalpha_track_a_paper_compatible
+profile_version: "2026-09-04"
+claim: paper_compatible_reproduction_not_exact_replication
+
+data:
+  primary_track: A1_baostock_pit_qlib_compatible
+  selection_from_test_results: forbidden
+  tracks:
+    A0_official_qlib_frozen:
+      role: field_and_training_period_calibration_only
+      provider: pyqlib_0.9.7_official_downloader
+      dataset_release: v2_latest_asset_last_modified_2024-05-22
+      archive: data/track_a/snapshots/qlib_v2_20240522_archive/qlib_data_cn_1d_latest.zip
+      archive_sha256: 8a323fec32e1bd0c1662c1fc753ad033f190523e450936e63c9509796ea32e41
+      first_date: "2005-01-04"
+      last_date: "2020-09-25"
+      test_coverage: insufficient_for_2021_2024
+    A1_baostock_pit_qlib_compatible:
+      role: complete_paper_compatible_reproduction
+      provider: BaoStock_0.9.x
+      panel_dir: data/baostock_hs300/panel
+      panel_manifest_sha256: 2080a0c02db38ce82c0555c53c4a210951ce2c22c85bbc57dd55374792957c85
+      panel_snapshot_hash: 7b879eba9151dab474598b5d9649dc34fb5648b46577b70b0417af6f49c20844
+      storage_snapshot_id: 835173ced5bc3329d8a8f9160714f74050e0fae7933555d4889fddf753c16eb8
+      source_lineage_root_sha256: 26bdfc98af27eda8fe32335fbfeef2eeb9bb0a15001dbc4de13f6125414f82c0
+      point_in_time_membership: true
+      historical_union_symbols: 790
+      includes_delisted_symbols: true
+      delisted_symbols: 38
+      research_watermark: RESEARCH_PROXY_ONLY
+
+dates:
+  train_start: "2011-01-01"
+  train_end: "2019-12-31"
+  validation_start: "2020-01-01"
+  validation_end: "2020-12-31"
+  test_start: "2021-01-01"
+  test_end: "2024-12-31"
+  purge_trading_days: 11
+  sealed_test_reveal_count: 1
+
+label:
+  name: future_10d_open_to_open
+  signal_time: t_close
+  entry: open_t_plus_1
+  exit: open_t_plus_11
+  formula: adjusted_open_t_plus_11_div_adjusted_open_t_plus_1_minus_1
+  horizon_trading_days: 10
+  entry_delay_trading_days: 1
+  missing_endpoint_policy: missing_no_forward_fill
+  terminal_bridge_catalog: configs/hs300_terminal_label_bridges.yaml
+  terminal_bridge_catalog_sha256: 127ae478d1533a4bc56416148df9660a309e2fb92d9023ec46cdfcfa3af1b657
+  terminal_bridge_identity_hash: f5e16017c6717b03856023a38c17ad2f822f76902eab3843681585786b312680
+  terminal_bridge_use: announced_symbol_exchange_exact_endpoint_only
+
+factor_search:
+  levels: 7
+  roles: 21
+  initial_population: 80
+  parent_pool: 32
+  children_per_generation: 96
+  generations: 24
+  subcycles: 3
+  generations_per_subcycle: 8
+  elite_carry: 2
+  final_factors: 20
+  codex_feedback_each_generation: true
+  feedback_fields:
+    - rejection_class
+    - train_raw_rank_ic
+    - validation_raw_rank_ic
+    - validation_neutral_rank_ic
+    - stability
+    - novelty
+    - turnover
+    - parent_delta
+  sealed_feedback: forbidden
+  semantic_repair: realtime_from_sanitized_feedback
+  parent_pairing: minimum_validation_residual_rank_correlation_within_quality_pool
+  selection:
+    algorithm: deterministic_nsga2
+    objectives_maximize:
+      - raw_rank_ic
+      - neutral_rank_ic
+      - stability
+      - novelty
+      - turnover_efficiency
+      - parent_delta
+    hard_constraints:
+      minimum_coverage: 0.70
+      predeclared_direction: true
+      price_scale_invariance: true
+      chronological_only: true
+
+python_factor_sandbox:
+  representation: single_factor_ctx_function
+  execution_mode: ast_lowering_without_exec_or_eval
+  network: denied
+  filesystem: no_generated_code_access
+  data: read_only_in_memory_view
+  max_source_bytes: 16384
+  max_ast_nodes: 256
+  cpu_seconds_per_worker: 7200
+  memory_bytes_per_worker: 8589934592
+  workers: 3
+  audited_extensions:
+    - ts_spectral_ratio
+    - ts_cusum
+    - ts_sign_entropy
+    - ts_state_transition
+    - cs_residual
+
+factor_metrics:
+  paper_primary: raw_daily_spearman_rank_ic
+  neutralization_in_paper_primary: false
+  development_secondary:
+    - industry_and_style_neutral_rank_ic
+    - hac_icir
+    - moving_block_bootstrap_lower_bound
+    - turnover
+    - novelty
+    - parent_and_linear_control_delta
+
+models:
+  refit_schedule_trading_days: 126
+  refit_training_window: expanding_past_only
+  refit_label_purge_trading_days: 11
+  feature_transform: daily_cross_sectional_rank_normalization
+  sample_weight: equal_date_weight
+  ridge:
+    alpha: 10.0
+    fit_intercept: true
+  lightgbm:
+    objective: regression
+    learning_rate: 0.0001
+    n_estimators: 1000
+    num_leaves: 32
+    max_depth: 12
+    reg_alpha: 1.0
+    reg_lambda: 1.0
+    subsample: 0.8
+    subsample_freq: 1
+    colsample_bytree: 0.8
+    deterministic: true
+    force_col_wise: true
+    n_jobs: 3
+    random_state: 17
+  unresolved_paper_defaults:
+    - min_child_samples
+    - boosting_type
+    - exact_early_stopping_behavior
+
+portfolio:
+  rebalance: daily
+  selection: top_50
+  drop: 5
+  entry_price: next_open
+  benchmark: CSI300
+  initial_capital_cny: 1000000
+  board_lot: 100
+  open_cost_rate: 0.0005
+  close_cost_rate: 0.0015
+  minimum_commission_cny: 5.0
+  stamp_duty_in_close_cost: included_as_paper_aggregate
+  execution_fail_closed_on:
+    - suspension
+    - price_limit
+    - missing_open
+
+reproducibility:
+  seed: 17
+  pyqlib_version: 0.9.7
+  freeze_before_search:
+    - config_sha256
+    - source_manifest_sha256
+    - implementation_sha256
+    - seed_factor_cards_sha256
+    - test_date_hash
+  persist_every_candidate: true
+  persist_every_failure: true
+  persist_sanitized_feedback: true
+  persist_codex_generation_response: true
+  persist_lineage: true
+  one_time_test_reveal: true
+
+known_non_parity:
+  - author_runtime_code_not_public
+  - author_exact_dataset_snapshot_not_public
+  - author_model_checkpoint_gpt_oss_120b_not_used
+  - author_complete_generated_factor_archive_not_public
+  - baostock_adjustment_and_membership_snapshot_can_differ_from_author_qlib_snapshot

@@ -1,0 +1,66 @@
+{
+  "files": [
+    {
+      "path": "data/from_zero/evaluation/analysis/FULL_BUDGET_CURVE_80.csv",
+      "source": "experiments/from_zero_information_20261010/evaluation/analysis/FULL_BUDGET_CURVE_80.csv",
+      "sha256": "15dcc5c584683dcb6bc467a6bcbb9b8006bba2b721251e1883534b61ed440ff2",
+      "bytes": 48408
+    },
+    {
+      "path": "data/from_zero/evaluation/analysis/CURVE_MEANS_20.csv",
+      "source": "experiments/from_zero_information_20261010/evaluation/analysis/CURVE_MEANS_20.csv",
+      "sha256": "c00c34f72898cc2c3dffedb0befd1becb015e1e8a691ddf9f29b8a14b9cb5816",
+      "bytes": 2805
+    },
+    {
+      "path": "data/from_zero/evaluation/analysis/RAW16_BASELINE_1.csv",
+      "source": "experiments/from_zero_information_20261010/evaluation/analysis/RAW16_BASELINE_1.csv",
+      "sha256": "efd139b73a5df4e0a695929e196e0ea956e1139d376518849376d595aa8584ed",
+      "bytes": 736
+    },
+    {
+      "path": "data/from_zero/evaluation/analysis/SEARCH_VS_RAW16_REPLICATE_INTERVALS.csv",
+      "source": "experiments/from_zero_information_20261010/evaluation/analysis/SEARCH_VS_RAW16_REPLICATE_INTERVALS.csv",
+      "sha256": "2d49635bad88af2b48f8b53212991910a906488b9643e4718cc434cfd983d9ef",
+      "bytes": 2116
+    },
+    {
+      "path": "data/from_zero/evaluation/analysis/SEARCH_VS_RAW16_PAIRED_16.csv",
+      "source": "experiments/from_zero_information_20261010/evaluation/analysis/SEARCH_VS_RAW16_PAIRED_16.csv",
+      "sha256": "ae37f30faa5b442bedbb25301dadd84629c48c6f9c509c75d85882b745536684",
+      "bytes": 1129
+    },
+    {
+      "path": "data/from_zero/results/COST_BY_BATCH.csv",
+      "source": "experiments/from_zero_information_20261010/results/COST_BY_BATCH.csv",
+      "sha256": "d5258acb841ba7c333cb75425c2ea5480a0d1d9dfbba69f2431346bbaf8ad599",
+      "bytes": 9596
+    },
+    {
+      "path": "data/continuation/PRIMARY_Q8_SEED_SUMMARIES.csv",
+      "source": "experiments/v17_extensions_20261006/c3/cap12_incremental_evaluation_v1/run/summary/PRIMARY_Q8_SEED_SUMMARIES.csv",
+      "sha256": "8a30e958c2d13ad5164421cc3a39d15a98f89a10a87b52dcc7d1dd6f5dc003b4",
+      "bytes": 19296
+    },
+    {
+      "path": "data/continuation/PRIMARY_Q8_SEED_CONTRASTS.csv",
+      "source": "experiments/v17_extensions_20261006/c3/cap12_incremental_evaluation_v1/run/summary/PRIMARY_Q8_SEED_CONTRASTS.csv",
+      "sha256": "0d043c5343bdb9dad6c5c4eaf296f8480507ee72e5fcb58c6c2f9662760d371b",
+      "bytes": 62191
+    },
+    {
+      "path": "data/common_inputs/effects.csv",
+      "source": "manuscript/v19_quantitative_finance_20261010/editorial/CI05_FIGURE_DATA.csv",
+      "sha256": "53d28ab284505f836ac66a1558cc94a4811bb2fc002720be7fd558ecb4b057a0",
+      "bytes": 858
+    },
+    {
+      "path": "data/historical/SEARCH_GENERATION.csv",
+      "source": "preserved historical search table",
+      "sha256": "b91d16ad8e5bf95e3c3281325046241d6809e3982cdd2c4771923b72ca6406df",
+      "bytes": 3396
+    }
+  ],
+  "total_bytes": 147135,
+  "scientific_computation_required": false
+}

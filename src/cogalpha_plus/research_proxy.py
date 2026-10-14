@@ -35,7 +35,11 @@ from .manifest import canonical_json, hash_json
 from .metrics import PreparedCrossSectionalNeutralizer, daily_ic, forward_return
 from .portfolio import ConstrainedPortfolioOptimizer, OptimizationResult
 from .runner import panel_snapshot_hash
-from .terminal_labels import TerminalLabelBridge, apply_terminal_label_bridges
+from .terminal_labels import (
+    TerminalLabelBridge,
+    apply_terminal_label_bridges,
+    validate_terminal_label_bridge_identity,
+)
 from .validation import (
     PRODUCTION_DSL_SPEC,
     SplitPlan,
@@ -952,19 +956,29 @@ def _recompute_development_handoff(
         entry_delay=split.entry_delay,
         trading_calendar=trading_calendar,
     )
+    try:
+        resolved_terminal_label_bridge_identity = (
+            validate_terminal_label_bridge_identity(
+                terminal_label_bridges, terminal_label_bridge_identity
+            )
+            if terminal_label_bridges
+            else {}
+        )
+    except ValueError as exc:
+        raise ResearchProxyBoundaryError(
+            "terminal label bridge catalog identity is invalid"
+        ) from exc
     labels, terminal_label_audit = apply_terminal_label_bridges(
         labels,
-        feature_tape["vwap"],
+        feature_tape,
         member_panel.index,
         terminal_label_bridges,
+        terminal_label_bridge_identity=resolved_terminal_label_bridge_identity,
+        endpoint_price_field="vwap",
         horizon=split.label_horizon,
         entry_delay=split.entry_delay,
         trading_calendar=trading_calendar,
     )
-    if terminal_label_bridges and terminal_label_bridge_identity is None:
-        raise ResearchProxyBoundaryError(
-            "terminal label bridges require a frozen catalog identity"
-        )
     labels = labels.reindex(member_panel.index)
     development_label_audit = _audit_development_labels(
         labels,
@@ -1067,7 +1081,7 @@ def _recompute_development_handoff(
         "development_handoff_policy_hash": policy.policy_hash,
         "development_label_audit": development_label_audit,
         "terminal_label_bridge_identity": dict(
-            terminal_label_bridge_identity or {}
+            resolved_terminal_label_bridge_identity
         ),
         "terminal_label_bridge_audit": terminal_label_audit,
         "neutral_feature_audit": feature_audit,

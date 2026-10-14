@@ -1,5 +1,5 @@
 schema_version: 1
-valuation_policy: exact_calendar_endpoint_successor_raw_vwap
+valuation_policy: exact_calendar_endpoint_successor_raw_endpoint_price
 events:
   - event_id: cnr_into_csr_20150520
     kind: symbol_exchange

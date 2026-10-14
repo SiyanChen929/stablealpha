@@ -1,7 +1,7 @@
 """CogAlpha-Plus research framework.
 
 The package deliberately separates candidate generation from deterministic
-calculation.  Codex (or another model) may propose hypotheses and expressions;
+calculation.  LLM (or another model) may propose hypotheses and expressions;
 only the versioned Python runtime is allowed to evaluate data and reveal gates.
 """
 

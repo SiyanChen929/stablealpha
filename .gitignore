@@ -1,13 +1,40 @@
-.venv/
+# Python
 __pycache__/
-.pytest_cache/
+*.py[cod]
 *.egg-info/
+.eggs/
+build/
+dist/
+.venv*/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Environment / secrets
 .env
-*API*Key*
-*api_key*
-data_cache/
-outputs/
-output/
+.env.*
+!.env.example
+
+# Market data and run outputs (never committed; vendor data is not redistributed)
+data/
 runs/
-*.sqlite*
+reports/
+outputs/
+artifacts/
+tmp/
+*.parquet
+*.sqlite
+*.npy
+*.zip
+*.csv.gz
+*.log
+
+# Regenerated figures
+paper/figure_reproduction/output/
+
+# OS / editors
 .DS_Store
+.idea/
+.vscode/
