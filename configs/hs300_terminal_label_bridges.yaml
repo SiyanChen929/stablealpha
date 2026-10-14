@@ -1,0 +1,16 @@
+schema_version: 1
+valuation_policy: exact_calendar_endpoint_successor_raw_vwap
+events:
+  - event_id: cnr_into_csr_20150520
+    kind: symbol_exchange
+    symbol: sh.601299
+    destination_symbol: sh.601766
+    announcement_date: 2014-12-30
+    effective_date: 2015-05-20
+    settlement_date: 2015-05-28
+    share_ratio: 1.10
+    net_cash_per_share: 0.0
+    sources:
+      - https://www.sse.com.cn/disclosure/announcement/general/c/c_20150910_3979290.shtml
+      - https://www.crrcgc.cc/Portals/128/upload/20141231073531741.pdf
+    note: China CNR was absorbed into China CSR; one CNR A share converted into 1.10 CSR A shares.

@@ -1,0 +1,508 @@
+schema_version: "1.0"
+catalog_id: cogalpha_seven_level_21_agents
+catalog_version: "2026-08-29"
+language: en
+
+provenance:
+  reference: Cognitive Alpha Mining via LLM-Driven Code-Based Evolution
+  official_prompt_repository: https://github.com/uwFengyuan/CogAlpha_Prompt
+  mapping_source: prompts/seven_level_agent_hierarchy/README.md
+  fidelity_note: >-
+    Agent names and level membership follow the official public prompt catalog.
+    Mandates, hypothesis templates, crossover tags, and failure modes below are
+    local, structured specifications; they are not verbatim upstream prompts.
+
+shared_contract:
+  output_artifact: factor_card
+  required_factor_card_fields:
+    - factor_id
+    - agent_id
+    - hypothesis
+    - economic_mechanism
+    - expected_direction
+    - forecast_horizon
+    - dsl_expression
+    - parameter_rationale
+    - expected_regime
+    - falsification_test
+    - parent_factor_ids
+  input_cutoff: signal_timestamp
+  permitted_feedback_scope: train_and_inner_validation_only
+  prohibited_inputs:
+    - future_returns_visible_to_generation_agent
+    - outer_test_metrics
+    - sealed_test_metrics
+    - future_universe_membership
+    - revised_data_not_available_at_signal_timestamp
+  parent_artifacts_allowed_during_evolution:
+    - factor_card
+    - normalized_dsl_ast
+    - training_feedback_summary
+    - inner_validation_feedback_summary
+
+allowed_input_catalog:
+  pit_ohlcv:
+    fields: [open, high, low, close, volume]
+    requirement: point_in_time_and_split_adjusted_without_future_revisions
+  pit_amount:
+    fields: [amount]
+    requirement: point_in_time
+  derived_price:
+    fields: [return, log_return, vwap, true_range, gap]
+    requirement: trailing_or_contemporaneous_only
+  derived_volume:
+    fields: [volume_change, amount_change, rolling_volume_share]
+    requirement: trailing_or_contemporaneous_only
+  market_context:
+    fields: [cross_sectional_breadth, market_return, market_volatility, market_volume]
+    requirement: constructed_only_from_the_same_point_in_time_universe
+  tradability_context:
+    fields: [listed_days, trading_status, price_limit_status]
+    requirement: known_at_signal_timestamp_and_used_for_masking_or_gating
+  parent_factors:
+    fields: [parent_factor_cards, parent_dsl_asts]
+    requirement: parents_must_come_from_the_current_training_run
+  adaptive_feedback:
+    fields: [effective_factor_summary, ineffective_factor_summary]
+    requirement: train_and_inner_validation_only
+
+levels:
+  - id: L1
+    level: 1
+    name: Market Structure and Cycle
+    purpose: Slow-moving phases, regime shifts, and cycle-related dynamics.
+  - id: L2
+    level: 2
+    name: Extreme Risk and Fragility
+    purpose: Crash precursors, tail risk, and asymmetric stress buildup.
+  - id: L3
+    level: 3
+    name: Price-Volume Dynamics
+    purpose: Liquidity, order imbalance, volume structure, and price-volume coherence.
+  - id: L4
+    level: 4
+    name: Price-Volatility Behavior
+    purpose: Trend, reversal, range, volatility asymmetry, and lagged responses.
+  - id: L5
+    level: 5
+    name: Multi-Scale Complexity
+    purpose: Drawdown, fractal structure, and herding behavior across windows.
+  - id: L6
+    level: 6
+    name: Stability and Regime-Gating
+    purpose: Stability-aware and regime-conditioned signal design.
+  - id: L7
+    level: 7
+    name: Geometric and Fusion
+    purpose: Candle geometry, composite transformations, and creative synthesis.
+
+agents:
+  - id: L1_market_cycle
+    level: 1
+    name: Market Cycle
+    upstream_template: agent_market_cycle.md
+    mandate: >-
+      Detect slow-moving accumulation, expansion, distribution, and contraction
+      phases from trailing price and participation dynamics, then express how a
+      security's position in that cycle predicts its cross-sectional return.
+    allowed_inputs: [pit_ohlcv, pit_amount, derived_price, derived_volume, market_context, adaptive_feedback, parent_factors]
+    hypothesis_templates:
+      - "A security whose {fast_window} trend strengthens relative to its {slow_window} trend is entering {cycle_phase}."
+      - "Price-cycle position confirmed by {participation_measure} is more persistent than an unconfirmed cycle signal."
+      - "A security's cycle phase relative to the contemporaneous market cycle contains cross-sectional information."
+    crossover_tags: [cycle, trend, participation_confirmation, market_relative, regime_gate, multi_scale]
+    failure_modes:
+      - slow_window_collapses_into_generic_momentum
+      - cycle_phase_is_defined_with_future_turning_points
+      - signal_is_market_beta_in_disguise
+      - excessive_lag_makes_the_signal_untradeable
+
+  - id: L1_volatility_regime
+    level: 1
+    name: Volatility Regime
+    upstream_template: agent_volatility_regime.md
+    mandate: >-
+      Identify transitions among quiet, expanding, stressed, and normalizing
+      volatility states, emphasizing state change rather than unconditional low
+      or high volatility exposure.
+    allowed_inputs: [pit_ohlcv, derived_price, market_context, adaptive_feedback, parent_factors]
+    hypothesis_templates:
+      - "The transition from {prior_regime} to {current_regime} changes the payoff of {base_signal}."
+      - "Volatility compression followed by range expansion predicts {continuation_or_reversal} when participation confirms."
+      - "Idiosyncratic volatility state relative to the market regime contains information beyond absolute volatility."
+    crossover_tags: [volatility_regime, state_transition, compression, expansion, market_relative, signal_gate]
+    failure_modes:
+      - unconditional_low_volatility_factor
+      - regime_threshold_is_tuned_to_validation_peaks
+      - realized_volatility_uses_forward_observations
+      - market_regime_dominates_cross_sectional_signal
+
+  - id: L2_crash_predictor
+    level: 2
+    name: Crash Predictor
+    upstream_template: agent_crash_predictor.md
+    mandate: >-
+      Detect point-in-time precursors of abrupt downside moves, including fragile
+      rallies, downside acceleration, vanishing participation, and unstable price
+      paths, without labeling crashes using future observations.
+    allowed_inputs: [pit_ohlcv, pit_amount, derived_price, derived_volume, market_context, adaptive_feedback, parent_factors]
+    hypothesis_templates:
+      - "A rising price with deteriorating {breadth_or_volume_proxy} indicates latent downside fragility."
+      - "Clusters of downside gaps and range expansion forecast elevated near-term crash probability."
+      - "Fragility is strongest when security-level stress rises faster than contemporaneous market stress."
+    crossover_tags: [crash_risk, fragility, divergence, downside_acceleration, liquidity_stress, defensive_gate]
+    failure_modes:
+      - crash_event_is_labeled_with_future_drawdown
+      - rare_event_threshold_overfits_a_few_episodes
+      - factor_is_merely_negative_recent_return
+      - unavailable_order_book_information_is_assumed
+
+  - id: L2_tail_risk
+    level: 2
+    name: Tail Risk
+    upstream_template: agent_tail_risk.md
+    mandate: >-
+      Measure asymmetric downside-tail exposure and stress accumulation using
+      trailing return and range distributions, distinguishing persistent tail
+      vulnerability from a single negative observation.
+    allowed_inputs: [pit_ohlcv, derived_price, market_context, adaptive_feedback, parent_factors]
+    hypothesis_templates:
+      - "Trailing downside semivariance relative to total variance predicts compensation or avoidance over {forecast_horizon}."
+      - "Repeated lower-tail observations with weak recovery indicate persistent fragility."
+      - "Tail concentration scaled by market tail stress isolates security-specific vulnerability."
+    crossover_tags: [tail_risk, downside_semivariance, skewness, recovery, stress_persistence, risk_scale]
+    failure_modes:
+      - unstable_high_order_moments_in_short_windows
+      - a_single_outlier_controls_the_factor
+      - tail_risk_is_indistinguishable_from_volatility
+      - sign_is_flipped_after_observing_test_results
+
+  - id: L3_liquidity
+    level: 3
+    name: Liquidity
+    upstream_template: agent_liquidity.md
+    mandate: >-
+      Construct OHLCV-based liquidity and price-impact proxies that separate
+      temporary impact, persistent participation, and capacity effects without
+      pretending to observe an unavailable limit-order book.
+    allowed_inputs: [pit_ohlcv, pit_amount, derived_price, derived_volume, tradability_context, adaptive_feedback, parent_factors]
+    hypothesis_templates:
+      - "Price movement per unit of {volume_or_amount} measures temporary impact whose normalization predicts {response}."
+      - "A divergence between turnover intensity and realized range reveals hidden liquidity demand."
+      - "The persistence of illiquidity, rather than its level, predicts subsequent cross-sectional returns."
+    crossover_tags: [liquidity, price_impact, turnover, capacity, reversal_confirmation, risk_scale]
+    failure_modes:
+      - pure_small_size_or_low_amount_exposure
+      - zero_volume_and_suspension_are_treated_as_signals
+      - division_by_tiny_amount_creates_outliers
+      - inferred_spread_is_presented_as_observed_spread
+
+  - id: L3_order_imbalance
+    level: 3
+    name: Order Imbalance
+    upstream_template: agent_order_imbalance.md
+    mandate: >-
+      Infer buying-versus-selling pressure from daily-bar location, signed volume,
+      gaps, and persistence while explicitly treating it as an OHLCV proxy rather
+      than observed trade or book imbalance.
+    allowed_inputs: [pit_ohlcv, pit_amount, derived_price, derived_volume, adaptive_feedback, parent_factors]
+    hypothesis_templates:
+      - "Volume signed by {bar_location_or_return_rule} approximates persistent net buying pressure."
+      - "Closing near the bar extreme with abnormal participation predicts short-horizon continuation."
+      - "Pressure that moves price less than expected indicates absorption and a possible delayed response."
+    crossover_tags: [order_imbalance_proxy, signed_volume, bar_location, absorption, continuation, lag_response]
+    failure_modes:
+      - proxy_is_mislabeled_as_true_order_flow
+      - close_location_divides_by_zero_range
+      - same_day_close_is_used_for_an_impossible_close_fill
+      - signal_reduces_to_signed_one_day_return
+
+  - id: L3_price_volume_coherence
+    level: 3
+    name: Price Volume Coherence
+    upstream_template: agent_price_volume_coherence.md
+    mandate: >-
+      Measure whether price direction, magnitude, and persistence are confirmed or
+      contradicted by participation across multiple trailing windows.
+    allowed_inputs: [pit_ohlcv, pit_amount, derived_price, derived_volume, adaptive_feedback, parent_factors]
+    hypothesis_templates:
+      - "Trend accompanied by rising normalized participation is more persistent than trend without confirmation."
+      - "Price-volume divergence signals exhaustion when {persistence_condition} holds."
+      - "Coherence across {short_window} and {long_window} separates transient noise from durable demand."
+    crossover_tags: [price_volume_coherence, confirmation, divergence, exhaustion, multi_scale, trend]
+    failure_modes:
+      - correlation_is_unstable_with_too_few_observations
+      - volume_trend_is_a_size_proxy
+      - simultaneous_price_and_volume_ranks_duplicate_known_factors
+      - divergence_direction_lacks_an_ex_ante_hypothesis
+
+  - id: L3_volume_structure
+    level: 3
+    name: Volume Structure
+    upstream_template: agent_volume_structure.md
+    mandate: >-
+      Describe the concentration, burstiness, persistence, and multi-horizon shape
+      of trading activity, connecting participation structure to information flow.
+    allowed_inputs: [pit_ohlcv, pit_amount, derived_volume, tradability_context, adaptive_feedback, parent_factors]
+    hypothesis_templates:
+      - "Concentrated participation bursts followed by persistence indicate informed trading rather than one-off noise."
+      - "The ratio of short- to long-horizon volume intensity identifies participation regime shifts."
+      - "Volume entropy or concentration conditions the reliability of a contemporaneous price signal."
+    crossover_tags: [volume_structure, burstiness, persistence, concentration, entropy, participation_gate]
+    failure_modes:
+      - suspension_or_listing_history_drives_volume_concentration
+      - raw_volume_creates_cross_sectional_size_bias
+      - entropy_estimate_is_unstable_in_short_windows
+      - one_abnormal_day_controls_the_entire_signal
+
+  - id: L4_daily_trend
+    level: 4
+    name: Daily Trend
+    upstream_template: agent_daily_trend.md
+    mandate: >-
+      Extract short- and medium-horizon directional persistence from daily bars,
+      distinguishing orderly trends from jump-driven or highly volatile moves.
+    allowed_inputs: [pit_ohlcv, derived_price, derived_volume, adaptive_feedback, parent_factors]
+    hypothesis_templates:
+      - "An orderly trend with high directional efficiency is more persistent than the same cumulative return with a noisy path."
+      - "Agreement between {short_window} and {medium_window} trends predicts continuation over {forecast_horizon}."
+      - "Trend strength scaled by path volatility separates drift from jump risk."
+    crossover_tags: [trend, directional_efficiency, path_quality, multi_scale, volatility_scale, volume_confirmation]
+    failure_modes:
+      - factor_is_a_plain_lookback_return
+      - trend_window_is_selected_from_test_performance
+      - price_level_or_adjustment_artifact_leaks_into_signal
+      - high_turnover_from_daily_rank_churn
+
+  - id: L4_lag_response
+    level: 4
+    name: Lag Response
+    upstream_template: agent_lag_response.md
+    mandate: >-
+      Model delayed adjustment and lead-lag behavior using only a security's own
+      history and contemporaneously available market context.
+    allowed_inputs: [pit_ohlcv, pit_amount, derived_price, derived_volume, market_context, adaptive_feedback, parent_factors]
+    hypothesis_templates:
+      - "A security that underreacts to contemporaneous market movement subsequently catches up."
+      - "Volume reacts before price when information is being accumulated, producing a delayed price response."
+      - "The residual response after removing immediate beta exposure predicts continuation or reversal."
+    crossover_tags: [lag_response, underreaction, delayed_adjustment, market_relative, volume_lead, residualization]
+    failure_modes:
+      - lead_lag_uses_noncontemporaneous_future_market_data
+      - static_beta_estimate_uses_the_full_sample
+      - effect_is_only_industry_or_market_beta
+      - arbitrary_lag_search_creates_multiple_testing_bias
+
+  - id: L4_range_vol
+    level: 4
+    name: Range Vol
+    upstream_template: agent_range_vol.md
+    mandate: >-
+      Use intraday high-low and open-close geometry to characterize realized range,
+      compression, expansion, and the information content of where movement occurs.
+    allowed_inputs: [pit_ohlcv, derived_price, adaptive_feedback, parent_factors]
+    hypothesis_templates:
+      - "A compressed trailing range followed by controlled expansion predicts breakout persistence."
+      - "The ratio of close-to-close movement to high-low range separates directional information from intraday noise."
+      - "Range volatility relative to return volatility identifies hidden two-sided disagreement."
+    crossover_tags: [range_volatility, compression, expansion, breakout, intraday_noise, bar_geometry]
+    failure_modes:
+      - zero_or_bad_high_low_range_causes_instability
+      - factor_reduces_to_unconditional_volatility
+      - same_day_high_low_requires_an_unavailable_execution_time
+      - extreme_price_limit_bars_dominate_results
+
+  - id: L4_reversal
+    level: 4
+    name: Reversal
+    upstream_template: agent_reversal.md
+    mandate: >-
+      Identify overreaction and mean reversion conditional on shock magnitude,
+      liquidity, path shape, and recovery evidence rather than relying on a bare
+      negative return transform.
+    allowed_inputs: [pit_ohlcv, pit_amount, derived_price, derived_volume, adaptive_feedback, parent_factors]
+    hypothesis_templates:
+      - "A large price shock relative to participation is more likely temporary and therefore reverses."
+      - "Reversal probability rises when a move is jump-like and lacks follow-through."
+      - "Partial recovery after an extreme move distinguishes stabilization from continued distress."
+    crossover_tags: [reversal, overreaction, price_impact, shock, recovery, liquidity_confirmation]
+    failure_modes:
+      - factor_is_only_negative_recent_return
+      - falling_knife_exposure_dominates
+      - price_limit_nontradability_creates_paper_alpha
+      - recovery_condition_uses_future_bars
+
+  - id: L4_vol_asymmetry
+    level: 4
+    name: Vol Asymmetry
+    upstream_template: agent_vol_asymmetry.md
+    mandate: >-
+      Compare upside and downside variation, range, and persistence to detect
+      leverage-like asymmetry, speculative demand, or downside fragility.
+    allowed_inputs: [pit_ohlcv, derived_price, market_context, adaptive_feedback, parent_factors]
+    hypothesis_templates:
+      - "Downside semivolatility rising relative to upside semivolatility signals fragility."
+      - "The asymmetry between positive- and negative-return persistence predicts subsequent reversal or continuation."
+      - "Security-level volatility asymmetry relative to market asymmetry isolates idiosyncratic stress."
+    crossover_tags: [volatility_asymmetry, semivariance, downside_risk, upside_speculation, market_relative, regime_gate]
+    failure_modes:
+      - insufficient_positive_or_negative_observations
+      - asymmetry_is_driven_by_one_extreme_day
+      - factor_duplicates_tail_risk
+      - conditional_samples_change_with_future_information
+
+  - id: L5_drawdown
+    level: 5
+    name: Drawdown
+    upstream_template: agent_drawdown.md
+    mandate: >-
+      Describe drawdown depth, duration, recovery speed, and repeated failure to
+      recover across horizons, using only trailing peaks known at the signal time.
+    allowed_inputs: [pit_ohlcv, derived_price, adaptive_feedback, parent_factors]
+    hypothesis_templates:
+      - "Drawdown depth combined with slow recovery indicates persistent weakness rather than a temporary discount."
+      - "Repeated near-recoveries that fail below the trailing peak reveal supply overhang."
+      - "The interaction of drawdown duration and recent stabilization predicts asymmetric recovery potential."
+    crossover_tags: [drawdown, duration, recovery, path_dependency, supply_overhang, reversal]
+    failure_modes:
+      - peak_is_identified_using_future_prices
+      - factor_is_equivalent_to_recent_return
+      - long_lookback_creates_listing_age_bias
+      - deep_drawdown_signals_untradeable_distress
+
+  - id: L5_fractal
+    level: 5
+    name: Fractal
+    upstream_template: agent_fractal.md
+    mandate: >-
+      Measure scale consistency, roughness, persistence, and self-similarity using
+      robust finite-sample approximations suitable for daily OHLCV histories.
+    allowed_inputs: [pit_ohlcv, derived_price, derived_volume, adaptive_feedback, parent_factors]
+    hypothesis_templates:
+      - "Scaling behavior across {window_set} distinguishes persistent paths from mean-reverting paths."
+      - "Price-path roughness conditions whether a trend signal represents drift or noise."
+      - "Divergent scaling between price and volume indicates a change in information-processing dynamics."
+    crossover_tags: [fractal, roughness, self_similarity, multi_scale, persistence, complexity]
+    failure_modes:
+      - fractal_estimator_is_unstable_for_short_series
+      - formula_complexity_exceeds_economic_content
+      - overlapping_windows_create_false_precision
+      - signal_is_a_repackaged_volatility_measure
+
+  - id: L5_herding
+    level: 5
+    name: Herding
+    upstream_template: agent_herding.md
+    mandate: >-
+      Infer synchronized crowd behavior from cross-sectional co-movement,
+      participation concentration, and repeated directional alignment using only
+      the contemporaneous point-in-time universe.
+    allowed_inputs: [pit_ohlcv, pit_amount, derived_price, derived_volume, market_context, adaptive_feedback, parent_factors]
+    hypothesis_templates:
+      - "Unusually high alignment with market direction and abnormal participation indicates crowding."
+      - "Crowded continuation becomes fragile when participation concentration rises while directional efficiency falls."
+      - "A security decoupling from a highly synchronized market may contain idiosyncratic information."
+    crossover_tags: [herding, crowding, synchronization, market_relative, fragility, decoupling]
+    failure_modes:
+      - current_universe_is_backfilled_into_history
+      - factor_is_only_market_beta
+      - cross_sectional_calculation_uses_future_constituents
+      - crowding_story_is_not_distinct_from_momentum
+
+  - id: L6_regime_gating
+    level: 6
+    name: Regime Gating
+    upstream_template: agent_regime_gating.md
+    mandate: >-
+      Build smooth, point-in-time state gates that condition another signal's
+      strength or direction, with explicit out-of-gate behavior and minimal
+      threshold tuning.
+    allowed_inputs: [pit_ohlcv, pit_amount, derived_price, derived_volume, market_context, parent_factors, adaptive_feedback]
+    hypothesis_templates:
+      - "{base_signal} is reliable only when {state_variable} lies in a pre-specified regime."
+      - "A smooth confidence gate based on {stability_measure} reduces false positives without eliminating coverage."
+      - "Security-specific and market-wide regimes jointly determine whether continuation or reversal dominates."
+    crossover_tags: [regime_gate, conditional_alpha, smooth_gate, confidence, market_state, stability]
+    failure_modes:
+      - hard_threshold_is_validation_curve_fitted
+      - gate_is_inactive_for_most_of_the_universe
+      - market_state_uses_end_of_period_information
+      - conditional_direction_has_no_mechanism
+
+  - id: L6_stability
+    level: 6
+    name: Stability
+    upstream_template: agent_stability.md
+    mandate: >-
+      Design signals whose estimates, directions, and ranks are stable across nearby
+      windows and small data perturbations, or explicitly use instability as a
+      confidence penalty.
+    allowed_inputs: [pit_ohlcv, pit_amount, derived_price, derived_volume, parent_factors, adaptive_feedback]
+    hypothesis_templates:
+      - "Agreement among nearby parameterizations indicates that {base_signal} reflects a broad mechanism rather than a sharp optimum."
+      - "Rank persistence supplies a confidence weight for a noisy short-horizon predictor."
+      - "A signal whose sign is consistent across multiple trailing windows is more robust out of sample."
+    crossover_tags: [stability, parameter_ensemble, confidence, rank_persistence, robustness, complexity_penalty]
+    failure_modes:
+      - stability_is_measured_using_future_factor_values
+      - smoothing_removes_all_actionable_information
+      - many_near_duplicate_windows_create_false_confirmation
+      - stable_factor_is_only_a_slow_style_exposure
+
+  - id: L7_bar_shape
+    level: 7
+    name: Bar Shape
+    upstream_template: agent_bar_shape.md
+    mandate: >-
+      Encode economically interpretable candle geometry—body, shadows, gaps, and
+      closing location—while normalizing for price scale, range, and limit states.
+    allowed_inputs: [pit_ohlcv, derived_price, tradability_context, adaptive_feedback, parent_factors]
+    hypothesis_templates:
+      - "A close near {bar_extreme} after a {gap_or_range_condition} reveals directional control."
+      - "The interaction of body-to-range ratio and shadow asymmetry predicts continuation or rejection."
+      - "A sequence of normalized bar shapes contains more information than a named single-candle pattern."
+    crossover_tags: [bar_geometry, closing_location, shadow_asymmetry, gap, rejection, sequence_pattern]
+    failure_modes:
+      - named_candlestick_story_without_statistical_content
+      - zero_range_or_price_limit_bar_breaks_normalization
+      - same_day_signal_assumes_close_price_execution
+      - excessive_discrete_pattern_sparsity
+
+  - id: L7_composite
+    level: 7
+    name: Composite
+    upstream_template: agent_composite.md
+    mandate: >-
+      Combine complementary parent mechanisms through conditional, scaling, or
+      confidence relationships that add behavior beyond a simple linear blend.
+    allowed_inputs: [pit_ohlcv, pit_amount, derived_price, derived_volume, market_context, parent_factors, adaptive_feedback]
+    hypothesis_templates:
+      - "Use {parent_b} as a confidence gate for {parent_a}, not as an additive score."
+      - "Scale {directional_parent} by {risk_or_liquidity_parent} to distinguish signal strength from implementation risk."
+      - "Activate different parent mechanisms in explicitly defined, point-in-time regimes."
+    crossover_tags: [composite, mechanism_crossover, confidence_gate, risk_scale, conditional_alpha, parent_complementarity]
+    failure_modes:
+      - child_is_only_a_weighted_sum_of_parents
+      - formula_growth_without_incremental_mechanism
+      - parents_are_semantically_or_empirically_duplicates
+      - validation_metrics_determine_the_gate_threshold
+
+  - id: L7_creative
+    level: 7
+    name: Creative
+    upstream_template: agent_creative.md
+    mandate: >-
+      Explore novel but falsifiable transformations and interactions outside the
+      better-covered templates, while respecting the same input, complexity,
+      leakage, and economic-mechanism constraints as every other agent.
+    allowed_inputs: [pit_ohlcv, pit_amount, derived_price, derived_volume, market_context, parent_factors, adaptive_feedback]
+    hypothesis_templates:
+      - "Transfer a well-defined concept from {adjacent_domain} into a trailing OHLCV statistic with a clear market mechanism."
+      - "Construct a path-shape invariant that separates trajectories with equal cumulative return but different information content."
+      - "Propose a falsifiable interaction omitted by the current mechanism coverage map and state how it differs from known factors."
+    crossover_tags: [creative, novel_mechanism, path_shape, cross_domain, sparse_coverage, falsifiable]
+    failure_modes:
+      - novelty_is_only_operator_or_parameter_complexity
+      - economic_narrative_is_added_after_seeing_metrics
+      - obscure_transform_is_numerically_unstable
+      - candidate_cannot_be_distinguished_from_existing_factor_families

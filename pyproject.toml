@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cogalpha-plus"
+version = "0.1.0"
+description = "Auditable CogAlpha-style factor evolution for personal quantitative portfolios"
+requires-python = ">=3.11"
+dependencies = [
+  "numpy>=1.26",
+  "pandas>=2.1",
+  "scipy>=1.11",
+  "scikit-learn>=1.4",
+  "PyYAML>=6.0",
+  "cvxpy>=1.4",
+]
+
+[project.optional-dependencies]
+production = ["lightgbm>=4.3", "pyqlib>=0.9.6"]
+data-baostock = ["baostock==0.9.3", "pyarrow>=15.0"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+cogalpha = "cogalpha_plus.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
