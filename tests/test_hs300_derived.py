@@ -44,7 +44,7 @@ def price_fixtures(days=8):
             "close": close,
             "volume": volume,
             "amount": amount,
-            "turn": np.where(volume > 0, 1.0, ""),
+            "turn": np.where(volume > 0, "1.0", ""),
             "tradestatus": np.where(volume > 0, 1, 0),
             "isST": 0,
             "adjustflag": "3",
